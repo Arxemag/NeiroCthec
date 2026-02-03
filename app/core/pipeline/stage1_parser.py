@@ -58,6 +58,17 @@ class StructuralParser:
         text = re.sub(r'\s+', ' ', text)
         return text
 
+    @staticmethod
+    def _normalize_sentence_endings(text: str) -> str:
+        """Заменяет финальные точки на многоточия для более мягкой интонации TTS."""
+        if text.endswith("..."):
+            return text
+        if text.endswith("…"):
+            return text
+        if text.endswith("."):
+            return f"{text[:-1]}…"
+        return text
+
     def _extract_remarks(self, text: str) -> List[Remark]:
         """Извлечение ремарок из текста"""
         remarks = []
@@ -238,6 +249,7 @@ class StructuralParser:
                     continue
 
                 original = self._soft_clean(raw)
+                original = self._normalize_sentence_endings(original)
                 is_dialogue = bool(DIALOGUE_START_RE.match(original))
 
                 # Разбиваем как диалоги, так и повествование
