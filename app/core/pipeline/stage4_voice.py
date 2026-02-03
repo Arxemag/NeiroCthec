@@ -132,8 +132,15 @@ class VoiceSynthesizer:
 
             speaker_wav = self._get_test_speaker_wav()
 
+            # 🔥 ТЕСТИРУЕМ ПРОБЛЕМУ С ОБРЕЗКОЙ
+            test_text = "Лора - есть что то интересное"
+            print(f"  Тестовый текст: '{test_text}'")
+
+            cleaned_text = self._clean_text_for_tts(test_text)
+            print(f"  После очистки: '{cleaned_text}'")
+
             self.tts.tts_to_file(
-                text="Тестирование синтеза речи на русском языке.",
+                text=cleaned_text,
                 speaker_wav=speaker_wav,
                 language="ru",
                 file_path=str(tmp_path),
@@ -224,6 +231,13 @@ class VoiceSynthesizer:
             # Пропускаем очень короткие строки
             if len(clean_text) < 3:
                 continue
+
+            # 🔥 ПРОВЕРКА: Сравниваем оригинал и очищенный текст
+            if line.original != clean_text:
+                print(f"  📝 Line {line.idx}:")
+                print(f"    Оригинал: '{line.original}'")
+                print(f"    Очищенный: '{clean_text}'")
+                print(f"    Разница: {len(line.original)} → {len(clean_text)} симв.")
 
             # Логирование прогресса
             if i <= 5 or i % 10 == 0:
@@ -340,67 +354,79 @@ class VoiceSynthesizer:
                 tmp_path.unlink(missing_ok=True)
 
     def _clean_text_for_tts(self, text: str) -> str:
-        """Очистка текста для XTTS - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+        """
+        🔥 ИСПРАВЛЕННЫЙ МЕТОД ОЧИСТКИ ТЕКСТА
+        Теперь НЕ удаляет буквы и важные символы
+        """
         if not text:
             return ""
 
-        # 1. Заменяем все типы кавычек на стандартные
-        # "умные" кавычки и разные варианты
-        text = text.replace('«', '"').replace('»', '"')
-        text = text.replace('„', '"').replace('"', '"')
-        text = text.replace('‚', "'").replace('‘', "'").replace('’', "'")
-        text = text.replace('‹', "'").replace('›', "'")
+        # Сохраняем оригинал для отладки
+        original_text = text
 
-        # 2. Убираем лишние пробелы
+        # 1. Убираем только лишние пробелы (сохраняем одиночные пробелы)
         text = ' '.join(text.split())
 
-        # 3. Обработка тире - разные типы тире заменяем на стандартное
-        text = re.sub(r'[—–−]+', '—', text)
+        # 2. Обработка тире - разные типы тире заменяем на стандартное
+        # НО НЕ УДАЛЯЕМ ТИРЕ!
+        text = re.sub(r'[—–−]', '—', text)  # Заменяем все тире на стандартное
 
-        # 4. Убираем пробелы после начального тире в диалогах
+        # 3. Убираем пробелы после начального тире в диалогах
         # но оставляем пробел перед тире в середине предложения
         text = re.sub(r'^—\s+', '—', text)  # В начале строки
-        text = re.sub(r'\s+—\s+', ' — ', text)  # В середине
 
-        # 5. Убираем лишние знаки препинания в конце
-        text = re.sub(r'[.!?]+$', lambda m: m.group()[-1] if m.group() else '', text)
+        # 4. Убираем только МНОЖЕСТВЕННЫЕ знаки препинания в конце
+        # но оставляем одиночные
+        text = re.sub(r'([.!?])\1+$', r'\1', text)  # !!! → !, ??? → ?
 
-        # 6. Нормализуем многоточие
+        # 5. Нормализуем многоточие
         text = re.sub(r'\.{3,}', '…', text)
 
-        # 7. Убираем пустые кавычки
-        text = text.replace('""', '').replace("''", '')
+        # 6. Убираем ТОЛЬКО ПУСТЫЕ кавычки (не трогаем кавычки с текстом)
+        # Это было причиной проблемы! Старый код: text.replace('""', '')
+        text = re.sub(r'""\s*""', '', text)  # Только если идут подряд
+        text = re.sub(r"''\s*''", '', text)  # Только если идут подряд
 
-        # 8. Обработка скобок
-        text = text.replace('(', '').replace(')', '')
-        text = text.replace('[', '').replace(']', '')
+        # 7. 🔥 ВАЖНО: НЕ УДАЛЯЕМ СКОБКИ, КАВЫЧКИ И ДРУГИЕ ВАЖНЫЕ СИМВОЛЫ
+        # XTTS нормально работает с ними
+        # Удаляем только реально проблемные символы:
+        text = re.sub(r'[\*\#@%&_]', ' ', text)  # Заменяем на пробел, а не удаляем
 
-        # 9. Обработка специальных символов
-        text = re.sub(r'[«»„"‚‘’‹›\*\#@%&_]', '', text)
+        # 8. Убираем только лишние пробелы после очистки
+        text = ' '.join(text.split())
 
-        # 10. Если текст короткий и без пунктуации в конце - добавляем точку
+        # 9. Если текст короткий и без пунктуации в конце - добавляем точку
         if len(text) > 0 and len(text) < 100:
             # Проверяем последний символ
             last_char = text[-1] if text else ''
-            if last_char not in ['.', '!', '?', '…', '"', "'", '—']:
-                # Но не добавляем точку если последнее слово короткое (предлог/союз)
-                last_word = text.split()[-1].lower() if text.split() else ''
-                short_words = {'и', 'а', 'но', 'что', 'как', 'чтобы', 'если',
-                               'когда', 'где', 'куда', 'откуда', 'почему', 'зачем'}
+            if last_char not in ['.', '!', '?', '…', '"', "'", '—', ')', ']', '}']:
+                # Но не добавляем точку если это диалог с тире
+                if not text.endswith('—'):
+                    # И не добавляем точку к коротким словам (предлогам/союзам)
+                    last_word = text.split()[-1].lower() if text.split() else ''
+                    short_words = {'и', 'а', 'но', 'что', 'как', 'чтобы', 'если',
+                                   'когда', 'где', 'куда', 'откуда', 'почему', 'зачем'}
 
-                if last_word not in short_words:
-                    text = text + '.'
+                    if last_word not in short_words:
+                        text = text + '.'
 
-        # 11. Финальная очистка пробелов
+        # 10. Финальная очистка пробелов
         text = text.strip()
 
-        # 12. Проверяем что текст не пустой
+        # 11. Проверяем что текст не пустой
         if not text or text.isspace():
             text = "Текст отсутствует."
 
-        # 13. Для отладки - логируем преобразования
-        if len(text) < 100:
-            print(f"    Очистка текста: '{text}'")
+        # 12. 🔥 ОТЛАДКА: Сравниваем с оригиналом
+        if original_text != text:
+            print(f"    🔍 Очистка текста:")
+            print(f"      Было: '{original_text}'")
+            print(f"      Стало: '{text}'")
+
+            # Проверяем не потерялись ли буквы
+            if len(text) < len(original_text) * 0.8:  # Потеряно больше 20%
+                print(f"      ⚠️  Возможно потеряны символы!")
+                print(f"      Длина: {len(original_text)} → {len(text)} символов")
 
         return text
 
@@ -453,6 +479,54 @@ class VoiceSynthesizer:
         return normalized
 
 
+# 🔥 ДОБАВЬТЕ ЭТУ ФУНКЦИЮ ДЛЯ ТЕСТИРОВАНИЯ
+def test_text_cleaning():
+    """Тестирует очистку текста"""
+    print("=" * 60)
+    print("🧪 ТЕСТИРОВАНИЕ ОЧИСТКИ ТЕКСТА")
+    print("=" * 60)
+
+    test_cases = [
+        # (оригинал, ожидаемый результат)
+        ("Лора - есть что то интересное", "Лора — есть что то интересное."),
+        ("«Привет» — сказал он.", "«Привет» — сказал он."),
+        ("Что-то (в скобках) важно", "Что-то (в скобках) важно."),
+        ("Она сказала: 'Иди сюда'", "Она сказала: 'Иди сюда'"),
+        ("Много !!! знаков???", "Много ! знаков?"),
+        ("Это... очень важно", "Это… очень важно."),
+        ("Текст с *звездочками*", "Текст с звездочками."),
+        ("Кавычки «» пустые", "Кавычки пустые."),
+        ("— Здравствуйте, — сказала она.", "— Здравствуйте, — сказала она."),
+        ("Название: 'Пираты Карибского моря'", "Название: 'Пираты Карибского моря'"),
+    ]
+
+    synthesizer = VoiceSynthesizer(device="cpu")
+
+    print("Проверяю очистку текста:\n")
+
+    all_passed = True
+    for original, expected in test_cases:
+        cleaned = synthesizer._clean_text_for_tts(original)
+
+        # Для сравнения игнорируем возможную точку в конце
+        cleaned_for_comparison = cleaned.rstrip('.')
+        expected_for_comparison = expected.rstrip('.')
+
+        passed = cleaned_for_comparison == expected_for_comparison
+
+        print(f"Оригинал:    '{original}'")
+        print(f"Очищенный:   '{cleaned}'")
+        print(f"Ожидалось:   '{expected}'")
+        print(f"Результат:   {'✅' if passed else '❌'}")
+        print(f"Длина:       {len(original)} → {len(cleaned)} символов")
+        print("-" * 40)
+
+        if not passed:
+            all_passed = False
+
+    print(f"\nИтог: {'✅ ВСЕ ТЕСТЫ ПРОЙДЕНЫ' if all_passed else '❌ ЕСТЬ ПРОБЛЕМЫ'}")
+
+
 class FastVoiceSynthesizer(VoiceSynthesizer):
     """Ускоренный синтезатор с кэшированием"""
 
@@ -503,3 +577,9 @@ class FastVoiceSynthesizer(VoiceSynthesizer):
             shutil.copy2(result, cache_file)
 
         return result
+
+
+# 🔥 ДОБАВЬТЕ ВЫЗОВ ТЕСТА В ОСНОВНОЙ СКРИПТ
+if __name__ == "__main__":
+    # Запуск теста очистки текста
+    test_text_cleaning()

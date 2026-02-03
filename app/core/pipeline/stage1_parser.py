@@ -34,7 +34,7 @@ REMARK_RE = re.compile(
 class StructuralParser:
     """
     Stage 1 — StructuralParser с поддержкой разбиения для XTTS
-    ИСПРАВЛЕН: Работает с обновлённой моделью Line
+    🔥 ИСПРАВЛЕН: Правильная индексация для сохранения порядка строк
     """
 
     # Оптимальные параметры для XTTS v2
@@ -42,8 +42,12 @@ class StructuralParser:
     XTTS_OPTIMAL_MIN = 40
     XTTS_OPTIMAL_MAX = 120
 
+    # 🔥 Множитель для индексации (оставляем место для сегментов)
+    ID_MULTIPLIER = 100
+
     def __init__(self, split_for_xtts: bool = True):
         self.split_for_xtts = split_for_xtts
+        self._next_id = 0  # 🔥 Счетчик для последовательных ID
 
     @staticmethod
     def _soft_clean(text: str) -> str:
@@ -90,14 +94,16 @@ class StructuralParser:
 
         # 3. Создаем Line для каждого сегмента
         lines = []
+        base_id = self._next_id  # 🔥 Используем текущий ID как базовый
+
         for i, segment in enumerate(segments):
             # Определяем тип: диалог или повествование
             line_type = "dialogue" if is_dialogue else "narrator"
             segment_is_dialogue = bool(DIALOGUE_START_RE.match(segment)) if is_dialogue else False
 
-            # 🔥 ИСПРАВЛЕНО: Создаём Line со всеми полями сразу
+            # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная индексация
             line = Line(
-                idx=line_idx * 1000 + i,
+                idx=self._next_id,  # 🔥 Последовательный ID
                 type=line_type,
                 original=segment,
                 remarks=self._extract_remarks(segment) if segment_is_dialogue else [],
@@ -105,13 +111,14 @@ class StructuralParser:
                 segment_index=i,
                 segment_total=len(segments),
                 full_original=text if i == 0 else None,
-                base_line_id=line_idx,
+                base_line_id=base_id,  # 🔥 Базовый ID для всех сегментов одной строки
                 speaker=None,
                 emotion=None,
                 audio_path=None
             )
 
             lines.append(line)
+            self._next_id += 1  # 🔥 Увеличиваем счетчик
 
         return lines
 
@@ -222,6 +229,7 @@ class StructuralParser:
     def parse_file(self, book_path: Path) -> UserBookFormat:
         """Парсинг файла с поддержкой сегментов"""
         parsed_lines: List[Line] = []
+        self._next_id = 0  # 🔥 Сбрасываем счетчик при каждом вызове
 
         with book_path.open("r", encoding="utf-8") as f:
             for idx, raw in enumerate(f):
@@ -232,13 +240,14 @@ class StructuralParser:
                 original = self._soft_clean(raw)
                 is_dialogue = bool(DIALOGUE_START_RE.match(original))
 
-                # 🔥 ИСПРАВЛЕНИЕ: Разбиваем как диалоги, так и повествование
+                # Разбиваем как диалоги, так и повествование
                 if self.split_for_xtts and self._should_split_for_xtts(original):
                     segment_lines = self._split_for_xtts(original, idx, is_dialogue)
                     parsed_lines.extend(segment_lines)
                 else:
+                    # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная индексация
                     line = Line(
-                        idx=idx,
+                        idx=self._next_id,  # 🔥 Последовательный ID
                         type="dialogue" if is_dialogue else "narrator",
                         original=original,
                         remarks=self._extract_remarks(original) if is_dialogue else [],
@@ -246,17 +255,24 @@ class StructuralParser:
                         segment_index=None,
                         segment_total=None,
                         full_original=None,
-                        base_line_id=idx,
+                        base_line_id=self._next_id,  # 🔥 Для несмегментированных строк base_id = id
                         speaker=None,
                         emotion=None,
                         audio_path=None
                     )
                     parsed_lines.append(line)
+                    self._next_id += 1  # 🔥 Увеличиваем счетчик
+
+        # 🔥 Проверяем порядок ID
+        self._validate_line_order(parsed_lines)
 
         print(f"✅ Stage1: Обработано {len(parsed_lines)} строк")
         if self.split_for_xtts:
             segments = [l for l in parsed_lines if l.is_segment]
             print(f"✅ Stage1: Создано {len(segments)} сегментов")
+
+        # 🔥 Выводим информацию о порядке
+        self._print_order_info(parsed_lines)
 
         return UserBookFormat(
             user_id=1,
@@ -264,3 +280,120 @@ class StructuralParser:
             version="v1",
             lines=parsed_lines
         )
+
+    def _validate_line_order(self, lines: List[Line]):
+        """Проверяет что ID идут последовательно"""
+        ids = [line.idx for line in lines]
+        ids_sorted = sorted(ids)
+
+        if ids != ids_sorted:
+            print(f"⚠️  ID не отсортированы! Сортирую...")
+            # Сортируем строки по ID
+            lines.sort(key=lambda l: l.idx)
+
+        # Проверяем непрерывность
+        expected_ids = list(range(len(lines)))
+        actual_ids = [line.idx for line in lines]
+
+        if expected_ids != actual_ids:
+            print(f"⚠️  ID не непрерывны!")
+            print(f"   Ожидалось: {expected_ids[:10]}...")
+            print(f"   Получено: {actual_ids[:10]}...")
+
+            # Исправляем ID
+            for i, line in enumerate(lines):
+                line.idx = i
+            print(f"   ✅ ID исправлены")
+
+    def _print_order_info(self, lines: List[Line]):
+        """Выводит информацию о порядке строк"""
+        print("\n📊 Информация о порядке строк:")
+        print("-" * 50)
+
+        # Группируем по базовым ID для сегментов
+        base_id_groups = {}
+        for line in lines:
+            if line.is_segment and line.base_line_id is not None:
+                if line.base_line_id not in base_id_groups:
+                    base_id_groups[line.base_line_id] = []
+                base_id_groups[line.base_line_id].append(line)
+
+        # Выводим первые 5 групп сегментов
+        if base_id_groups:
+            print(f"  Сегменты сгруппированы по {len(base_id_groups)} базовым ID")
+            for i, (base_id, seg_lines) in enumerate(list(base_id_groups.items())[:3]):
+                seg_ids = [l.idx for l in seg_lines]
+                print(f"    Базовый ID {base_id}: сегменты {seg_ids}")
+
+        # Выводим первые 10 строк с их порядком
+        print(f"\n  Первые 10 строк в порядке сборки:")
+        for i, line in enumerate(lines[:10]):
+            seg_info = f" [сегмент {line.segment_index + 1}/{line.segment_total}]" if line.is_segment else ""
+            base_info = f" (base:{line.base_line_id})" if line.base_line_id != line.idx else ""
+            print(f"    {i:2d}. ID:{line.idx:3d}{seg_info}{base_info}: {line.type} - {line.original[:40]}...")
+
+        # Проверяем правильность порядка для Stage5
+        print(f"\n  Проверка для Stage5:")
+        for i in range(min(5, len(lines) - 1)):
+            current = lines[i]
+            next_line = lines[i + 1]
+
+            # Проверяем логику сортировки Stage5
+            if current.is_segment and next_line.is_segment:
+                if current.base_line_id == next_line.base_line_id:
+                    # Сегменты одной строки должны идти подряд
+                    if current.segment_index < next_line.segment_index:
+                        print(f"    ✅ Сегменты {current.idx} → {next_line.idx}: правильный порядок")
+                    else:
+                        print(f"    ⚠️  Сегменты {current.idx} → {next_line.idx}: НЕПРАВИЛЬНЫЙ порядок!")
+            else:
+                print(f"    {current.idx} → {next_line.idx}: OK")
+
+
+# 🔥 Дополнительная утилита для тестирования порядка
+def test_line_order_simple():
+    """Тестирование порядка строк на простом примере"""
+    print("🧪 Тестирование порядка строк Stage1")
+    print("=" * 60)
+
+    test_content = """Первое повествование, которое достаточно длинное чтобы быть разбитым на сегменты для XTTS v2 модели синтеза речи.
+— Привет, — сказал он. — Как дела?
+Второе повествование покороче.
+— Отлично! — ответила она."""
+
+    test_file = Path("storage/books/test_order.txt")
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text(test_content, encoding="utf-8")
+
+    parser = StructuralParser(split_for_xtts=True)
+    ubf = parser.parse_file(test_file)
+
+    print(f"\n📋 Результат парсинга ({len(ubf.lines)} строк):")
+    for i, line in enumerate(ubf.lines):
+        seg_info = f" [сегмент {line.segment_index + 1}/{line.segment_total}]" if line.is_segment else ""
+        base_info = f" (base:{line.base_line_id})" if line.base_line_id != line.idx else ""
+        print(
+            f"  {i:2d}. ID:{line.idx:3d}{seg_info}{base_info}: {line.type}/{line.speaker or '?'} - {line.original[:50]}...")
+
+    # Проверяем сортировку для Stage5
+    print(f"\n🔍 Проверка сортировки для Stage5:")
+
+    # Имитируем логику Stage5
+    lines_with_sort_key = []
+    for line in ubf.lines:
+        if line.is_segment and line.base_line_id is not None:
+            sort_key = (line.base_line_id, line.segment_index or 0)
+        else:
+            sort_key = (line.idx, 0)
+        lines_with_sort_key.append((sort_key, line))
+
+    sorted_lines = sorted(lines_with_sort_key, key=lambda x: x[0])
+
+    print("  Правильный порядок сборки:")
+    for i, (sort_key, line) in enumerate(sorted_lines):
+        seg_info = f" [сегмент {line.segment_index + 1}/{line.segment_total}]" if line.is_segment else ""
+        print(f"    {i:2d}. Сортировка:{sort_key}: ID:{line.idx}{seg_info} - {line.type}")
+
+    test_file.unlink()
+
+    return ubf
