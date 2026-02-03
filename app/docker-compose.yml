@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  tts:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    volumes:
+      - ./storage:/app/storage
+      - tts_cache:/root/.cache/tts
+
+
+volumes:
+  tts_cache:  # именованный volume — живёт между перезапусками
