@@ -80,7 +80,7 @@ class StructuralParser:
             return False
         return len(text) > self.XTTS_OPTIMAL_MAX
 
-    def _split_for_xtts(self, text: str, line_idx: int) -> List[Line]:
+    def _split_for_xtts(self, text: str, line_idx: int, is_dialogue: bool = False) -> List[Line]:
         """Разбивает текст на оптимальные сегменты для XTTS"""
         # 1. Сначала разбиваем на предложения
         sentences = self._split_into_sentences(text)
@@ -91,14 +91,16 @@ class StructuralParser:
         # 3. Создаем Line для каждого сегмента
         lines = []
         for i, segment in enumerate(segments):
-            is_dialogue = bool(DIALOGUE_START_RE.match(segment))
+            # Определяем тип: диалог или повествование
+            line_type = "dialogue" if is_dialogue else "narrator"
+            segment_is_dialogue = bool(DIALOGUE_START_RE.match(segment)) if is_dialogue else False
 
             # 🔥 ИСПРАВЛЕНО: Создаём Line со всеми полями сразу
             line = Line(
                 idx=line_idx * 1000 + i,
-                type="dialogue" if is_dialogue else "narrator",
+                type=line_type,
                 original=segment,
-                remarks=self._extract_remarks(segment) if is_dialogue else [],
+                remarks=self._extract_remarks(segment) if segment_is_dialogue else [],
                 is_segment=True,
                 segment_index=i,
                 segment_total=len(segments),
@@ -230,9 +232,9 @@ class StructuralParser:
                 original = self._soft_clean(raw)
                 is_dialogue = bool(DIALOGUE_START_RE.match(original))
 
-                # Проверяем, нужно ли разбивать для XTTS
-                if self.split_for_xtts and is_dialogue and self._should_split_for_xtts(original):
-                    segment_lines = self._split_for_xtts(original, idx)
+                # 🔥 ИСПРАВЛЕНИЕ: Разбиваем как диалоги, так и повествование
+                if self.split_for_xtts and self._should_split_for_xtts(original):
+                    segment_lines = self._split_for_xtts(original, idx, is_dialogue)
                     parsed_lines.extend(segment_lines)
                 else:
                     line = Line(

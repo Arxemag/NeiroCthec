@@ -5,10 +5,23 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - ./storage:/app/storage
       - tts_cache:/root/.cache/tts
-
+      # 🔥 ДОБАВЬТЕ ЭТИ СТРОКИ для монтирования исходного кода
+      - ./app/core:/app/core  # Монтирование всей папки core
+      - ./app/debug_pipeline.py:/app/debug_pipeline.py  # Монтирование файла
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
-  tts_cache:  # именованный volume — живёт между перезапусками
+  tts_cache:

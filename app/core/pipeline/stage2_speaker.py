@@ -12,9 +12,9 @@ from core.models import Line, UserBookFormat, Remark
 class SpeakerConfig:
     """Конфигурация резолвера спикеров"""
     # Основные настройки
-    use_simple_rules: bool = True  # 🔥 ВКЛЮЧАЕМ простые правила
-    use_natasha: bool = False  # 🔥 ОТКЛЮЧАЕМ Natasha пока что
-    fallback_to_narrator: bool = False  # 🔥 НЕ фолбэкаем на narrator в диалогах
+    use_simple_rules: bool = True  # ВКЛЮЧАЕМ простые правила
+    use_natasha: bool = False  # ОТКЛЮЧАЕМ Natasha пока что
+    fallback_to_narrator: bool = False  # НЕ фолбэкаем на narrator в диалогах
 
     # Правила для простого определения
     explicit_patterns: Dict[str, str] = field(default_factory=lambda: {
@@ -69,8 +69,12 @@ class SpeakerResolver:
         logging.basicConfig(level=self.config.log_level)
         self.logger = logging.getLogger(__name__)
 
+        # Для статистики
+        self._last_ubf = None
+
     def process(self, ubf: UserBookFormat) -> UserBookFormat:
         """Обработка всех строк"""
+        self._last_ubf = ubf
         self.stats['total_lines'] = len(ubf.lines)
 
         print(f"\n🎭 Stage 2: Определение спикеров")
@@ -231,15 +235,10 @@ class SpeakerResolver:
 
         # Распределение спикеров
         speakers = {}
-        for line in [l for l in self._last_ubf.lines if l.speaker]:
-            speakers[line.speaker] = speakers.get(line.speaker, 0) + 1
+        if self._last_ubf:
+            for line in self._last_ubf.lines:
+                if line.speaker:
+                    speakers[line.speaker] = speakers.get(line.speaker, 0) + 1
 
         if speakers:
             print(f"  Распределение спикеров: {speakers}")
-
-    # Для статистики
-    _last_ubf = None
-
-    def process(self, ubf: UserBookFormat) -> UserBookFormat:
-        self._last_ubf = ubf
-        return super().process(ubf)

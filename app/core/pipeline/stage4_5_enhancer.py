@@ -43,13 +43,21 @@ class SimpleAudioEnhancer:
 
             input_path = Path(line.audio_path)
             if not input_path.exists():
-                continue
+                # 🔥 ИСПРАВЛЕНИЕ: Пробуем найти файл в разных местах
+                input_path = self._find_audio_file(line)
+                if not input_path:
+                    print(f"  ⚠️  Файл не найден для line {line.idx}")
+                    continue
 
             try:
-                # Простая обработка
+                # 🔥 ИСПРАВЛЕНИЕ: Сохраняем с правильным именем
                 enhanced_path = self._simple_enhance(input_path, enhanced_dir, line)
+
+                # 🔥 ВАЖНО: Обновляем audio_path в модели Line
                 line.audio_path = str(enhanced_path)
                 processed += 1
+
+                print(f"  ✅ Обработан: {enhanced_path.name}")
 
             except Exception as e:
                 print(f"  ⚠️  Ошибка обработки {input_path.name}: {e}")
@@ -59,8 +67,14 @@ class SimpleAudioEnhancer:
 
     def _simple_enhance(self, input_path: Path, output_dir: Path, line: Line) -> Path:
         """Простое улучшение аудио"""
-        # Имя выходного файла
-        output_name = input_path.stem + "_enhanced.wav"
+        # 🔥 ИСПРАВЛЕНИЕ: Сохраняем с тем же именем файла
+        if line.is_segment:
+            base_id = line.base_line_id if line.base_line_id is not None else line.idx
+            seg_idx = line.segment_index or 0
+            output_name = f"{base_id:05d}_{line.speaker or 'narrator'}_seg{seg_idx}_enhanced.wav"
+        else:
+            output_name = f"{line.idx:05d}_{line.speaker or 'narrator'}_enhanced.wav"
+
         output_path = output_dir / output_name
 
         # Если уже обработан - возвращаем
@@ -90,6 +104,43 @@ class SimpleAudioEnhancer:
         sf.write(str(output_path), audio, sr, subtype='PCM_16')
 
         return output_path
+
+    def _find_audio_file(self, line: Line) -> Optional[Path]:
+        """Находит аудио файл в разных местах"""
+        if line.audio_path:
+            path = Path(line.audio_path)
+            if path.exists():
+                return path
+
+        # Ищем по паттерну имени
+        if line.is_segment:
+            base_id = line.base_line_id if line.base_line_id is not None else line.idx
+            seg_idx = line.segment_index or 0
+            patterns = [
+                f"{base_id:05d}_{line.speaker or 'narrator'}_seg{seg_idx}.wav",
+                f"{line.idx:05d}_{line.speaker or 'narrator'}_seg{seg_idx}.wav",
+            ]
+        else:
+            patterns = [
+                f"{line.idx:05d}_{line.speaker or 'narrator'}.wav",
+            ]
+
+        # Места для поиска
+        search_dirs = [
+            Path("storage/audio/segments/raw"),
+            Path("storage/audio/segments"),
+            Path("storage/audio/raw"),
+            Path("storage/audio"),
+        ]
+
+        for dir_path in search_dirs:
+            if dir_path.exists():
+                for pattern in patterns:
+                    file_path = dir_path / pattern
+                    if file_path.exists():
+                        return file_path
+
+        return None
 
 
 # Фабричная функция
