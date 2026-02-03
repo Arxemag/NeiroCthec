@@ -109,3 +109,6 @@ dmypy.json
 # PyCharm project files
 .project
 .pydevproject
+
+app.py
+app_xz.py
