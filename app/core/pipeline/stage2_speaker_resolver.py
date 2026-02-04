@@ -7,260 +7,471 @@ from collections import defaultdict
 
 from core.models import Line, UserBookFormat, Remark
 
+# 🔥 БЕЗОПАСНЫЙ ИМПОРТ
+try:
+    from .stage2_0_verb_dictionary import (
+        VerbDictionary,
+        BookVerbAnalyzer,
+        get_global_verb_dictionary,
+        update_global_dictionary,
+        analyze_context
+    )
+except ImportError:
+    class VerbDictionary:
+        male_verbs = set()
+        female_verbs = set()
+        context_indicators = {'male': set(), 'female': set()}
+
+
+    class BookVerbAnalyzer:
+        def analyze_book(self, lines): return VerbDictionary()
+
+
+    def get_global_verb_dictionary():
+        return VerbDictionary()
+
+
+    def update_global_dictionary(*args):
+        pass
+
+
+    def analyze_context(*args):
+        return "unknown", []
+
 
 @dataclass
 class SpeakerResolverConfig:
-    """ИСПРАВЛЕННАЯ конфигурация"""
-    confidence_threshold: float = 1.5
-    high_confidence_threshold: float = 2.0
+    # 🔥 УБРАЛ high_confidence_threshold - оставил только основные параметры
+    confidence_threshold: float = 0.3
     use_narrator_fallback: bool = False
     debug_detailed: bool = True
+    analyze_verbs: bool = True
 
-    # 🔥🔥🔥 ПЕРЕПИСЫВАЕМ ПАТТЕРНЫ ПРАВИЛЬНО!
-    patterns: Dict[str, Tuple[str, float]] = field(default_factory=lambda: {
-        # 🔥 ОБЩИЕ ПАТТЕРНЫ С АВТООПРЕДЕЛЕНИЕМ ПО ГЛАГОЛУ
-        r'([а-я]+л[а])\s+он[а]?': ('verb_gender', 3.0),  # Сначала определяем род глагола!
-    })
-
-    # 🔥 ОТДЕЛЬНЫЕ СЛОВАРЯ ГЛАГОЛОВ
+    # 🔥 РАСШИРЕННЫЕ СЛОВАРИ
     female_verbs: set = field(default_factory=lambda: {
-        "сказала", "доложила", "сообщила", "спросила", "ответила", "прошептала",
-        "произнесла", "промолвила", "воскликнула", "заметила", "добавила"
+        "сказала", "доложила", "сообщила", "спросила", "ответила", "закивала",
+        "улыбнулась", "кивнула", "прочистив", "начала", "ответила"
     })
     male_verbs: set = field(default_factory=lambda: {
-        "сказал", "доложил", "сообщил", "спросил", "ответил", "прошептал",
-        "произнес", "промолвил", "воскликнул", "заметил", "добавил", "скомандовал", "выдохнул"
+        "сказал", "доложил", "сообщил", "спросил", "ответил", "проговорил",
+        "принял", "догадался", "согласился", "решил", "послышался"
     })
 
-    female_names: set = field(default_factory=lambda: {"лора", "анна", "мария", "екатерина", "ольга"})
-    male_names: set = field(default_factory=lambda: {"иван", "пётр", "сергей", "алексей"})
+    female_names: set = field(default_factory=lambda: {"лора", "анна", "мария", "девушка"})
+    male_names: set = field(default_factory=lambda: {"иван", "пётр", "сергей"})
 
 
 class SpeakerResolver:
-    """ИСПРАВЛЕННАЯ версия резолвера"""
+    # 🔥 СБАЛАНСИРОВАННЫЕ ВЕСА
+    WEIGHTS = {
+        'explicit_pronoun_verb': 3.0,  # "сказал я" - самый сильный
+        'verb_endings': 2.5,  # окончания глаголов
+        'static_verbs': 2.0,  # глаголы из конфига
+        'context_name_indicators': 1.8,  # "девушка сказала"
+        'dynamic_verbs': 1.5,  # глаголы из словаря
+        'pronoun_ratio': 1.2,  # местоимения
+        'names': 1.0,  # имена
+        'dialogue_context': 0.8,  # контекст диалога
+        'context_indicators': 0.6,  # общие контекстные слова
+        'book_statistics': 0.3,  # статистика книги
+    }
 
     def __init__(self, config: Optional[SpeakerResolverConfig] = None):
         self.config = config or SpeakerResolverConfig()
+        self.verb_analyzer = BookVerbAnalyzer()
+        self.verb_dictionary = get_global_verb_dictionary()
         self.last_speaker = None
         self.segment_speakers = {}
         self.stats = defaultdict(int)
         self.logger = logging.getLogger(__name__)
+        self.book_gender_stats = {'male': 0, 'female': 0, 'total': 0}
+
+        # 🔥 ИНИЦИАЛИЗАЦИЯ ПО УМОЛЧАНИЮ
+        if not hasattr(self.verb_dictionary, 'male_verbs'):
+            self.verb_dictionary.male_verbs = set()
+        if not hasattr(self.verb_dictionary, 'female_verbs'):
+            self.verb_dictionary.female_verbs = set()
+        if not hasattr(self.verb_dictionary, 'context_indicators'):
+            self.verb_dictionary.context_indicators = {'male': set(), 'female': set()}
 
     def process(self, ubf: UserBookFormat) -> UserBookFormat:
-        print(f"\n🎭 Stage 2 — Speaker Resolution")
-        print("🔥 ИСПРАВЛЕННЫЙ АЛГОРИТМ")
+        """ОСНОВНОЙ МЕТОД"""
+        try:
+            print(f"\n🎭 Stage 2 — Speaker Resolution")
 
-        for i, line in enumerate(sorted(ubf.lines, key=lambda l: l.idx)):
-            self._process_line(line, i)
+            # 🔥 Анализ глаголов книги
+            if self.config.analyze_verbs:
+                print("🔍 Анализ глаголов и контекста книги...")
+                try:
+                    book_dictionary = self.verb_analyzer.analyze_book(ubf.lines)
+                    update_global_dictionary(book_dictionary)
+                    self.verb_dictionary = get_global_verb_dictionary()
+                except Exception as e:
+                    print(f"⚠️ Ошибка анализа глаголов: {e}")
 
-        self._log_statistics(ubf)
-        return ubf
+            # Рассчитываем статистику книги
+            self._calculate_book_gender_stats(ubf)
+
+            # 🔥 ОБРАБОТКА С ДЕБАГ-ВЫВОДОМ
+            for i, line in enumerate(sorted(ubf.lines, key=lambda l: l.idx)):
+                if self.config.debug_detailed and line.type == "dialogue":
+                    print(f"\n--- Line {i:04d} ---")
+                    print(f"Text: {line.original[:100]}...")
+
+                self._process_line(line, i)
+
+            self._log_statistics(ubf)
+            return ubf
+
+        except Exception as e:
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+            return ubf
+
+    def _calculate_book_gender_stats(self, ubf: UserBookFormat):
+        """Рассчитывает статистику полов по книге"""
+        try:
+            male_count = 0
+            female_count = 0
+
+            for line in ubf.lines:
+                if line.type == "dialogue" and line.speaker:
+                    if line.speaker == "male":
+                        male_count += 1
+                    elif line.speaker == "female":
+                        female_count += 1
+
+            self.book_gender_stats = {
+                'male': male_count,
+                'female': female_count,
+                'total': male_count + female_count
+            }
+        except Exception as e:
+            self.book_gender_stats = {'male': 0, 'female': 0, 'total': 0}
 
     def _process_line(self, line: Line, line_index: int):
-        if line.type != "dialogue":
-            line.speaker = "narrator"
-            self.stats['narrator_lines'] += 1
-            return
+        """ОБРАБОТКА СТРОКИ"""
+        try:
+            if line.type != "dialogue":
+                line.speaker = "narrator"
+                self.stats['narrator_lines'] += 1
+                return
 
-        self.stats['dialogue_lines'] += 1
+            self.stats['dialogue_lines'] += 1
 
-        # Проверка контекста сегментов
-        if line.is_segment and line.base_line_id is not None and line.base_line_id in self.segment_speakers:
-            line.speaker = self.segment_speakers[line.base_line_id]
-            self.stats['from_context'] += 1
-            self.last_speaker = line.speaker
-            return
+            # 🔥 Сначала проверяем контекст сегмента
+            if line.is_segment and line.base_line_id is not None and line.base_line_id in self.segment_speakers:
+                line.speaker = self.segment_speakers[line.base_line_id]
+                self.stats['from_context'] += 1
+                self.last_speaker = line.speaker
+                return
 
-        # 🔥🔥🔥 ИСПРАВЛЕННЫЙ АНАЛИЗ С ПРАВИЛЬНЫМИ ПРИОРИТЕТАМИ
-        speaker, confidence, reasoning = self._analyze_text_with_reasoning(line)
+            # 🔥 ОСНОВНОЙ АНАЛИЗ
+            speaker, confidence, reasoning = self._analyze_text_with_reasoning(line)
 
-        if speaker != "unknown":
-            line.speaker = speaker
-            self.stats['resolved'] += 1
+            # 🔥 УПРОЩЕННАЯ ЛОГИКА ПРИНЯТИЯ РЕШЕНИЯ
+            if speaker != "unknown" and confidence >= self.config.confidence_threshold:
+                line.speaker = speaker
+                self.stats['resolved'] += 1
+                self.last_speaker = speaker
 
-            if self.config.debug_detailed:
-                print(f"✅ Line {line_index}: {speaker} (confidence: {confidence:.2f})")
-                for reason in reasoning:
-                    print(f"   {reason}")
-        else:
-            # 🔥 ИСПРАВЛЕННЫЙ ФОЛБЭК
-            if self.last_speaker and self.last_speaker != "narrator":
-                # Чередуем male/female чтобы избежать цепной реакции
-                if self.last_speaker == "male":
-                    line.speaker = "female"
-                    fallback_reason = "alternating (male→female)"
-                else:
-                    line.speaker = "male"
-                    fallback_reason = "alternating (female→male)"
+                if self.config.debug_detailed:
+                    print(f"✅ {speaker.upper()} (conf: {confidence:.2f})")
+                    for reason in reasoning[:3]:
+                        print(f"   {reason}")
             else:
-                line.speaker = "male"
-                fallback_reason = "default"
-            self.stats['fallback'] += 1
+                # 🔥 УМНЫЙ ФОЛБЭК
+                fallback_speaker, fallback_reason = self._smart_fallback(line, reasoning)
+                line.speaker = fallback_speaker
+                self.stats['fallback'] += 1
+                self.last_speaker = fallback_speaker
 
-            if self.config.debug_detailed:
-                print(f"🔄 Line {line_index}: {line.speaker} (fallback: {fallback_reason})")
+                if self.config.debug_detailed:
+                    print(f"🔄 {fallback_speaker.upper()} (fallback: {fallback_reason})")
 
-        # Сохраняем контекст
-        if line.is_segment and line.base_line_id is not None:
-            self.segment_speakers[line.base_line_id] = line.speaker
+            # Сохраняем для сегментов
+            if line.is_segment and line.base_line_id is not None:
+                self.segment_speakers[line.base_line_id] = line.speaker
 
-        self.last_speaker = line.speaker
+        except Exception as e:
+            print(f"⚠️ Ошибка строки {line_index}: {e}")
+            line.speaker = "unknown"
 
     def _analyze_text_with_reasoning(self, line: Line) -> Tuple[str, float, List[str]]:
-        """Анализ с возвратом причин"""
-        reasoning = []
-        text = line.original.lower()
-        remarks_text = ""
+        """УПРОЩЕННЫЙ АНАЛИЗ"""
+        try:
+            reasoning = []
+            scores = {'male': 0.0, 'female': 0.0}
+            text = line.original.lower()
 
-        if line.remarks:
-            for remark in line.remarks:
-                remarks_text += " " + remark.text.lower()
+            # 🔥 1. САМЫЙ ВАЖНЫЙ: ЯВНЫЕ УКАЗАТЕЛИ "я" + глагол
+            explicit_score = self._score_explicit_pronoun_verb(text)
+            scores['male'] += explicit_score['male'] * self.WEIGHTS['explicit_pronoun_verb']
+            scores['female'] += explicit_score['female'] * self.WEIGHTS['explicit_pronoun_verb']
+            reasoning.extend(explicit_score['reasons'])
 
-        full_text = text + remarks_text
+            # 🔥 2. ОКОНЧАНИЯ ГЛАГОЛОВ
+            endings_score = self._score_verb_endings(text)
+            scores['male'] += endings_score['male'] * self.WEIGHTS['verb_endings']
+            scores['female'] += endings_score['female'] * self.WEIGHTS['verb_endings']
+            reasoning.extend(endings_score['reasons'])
 
-        # 🔥 1. АНАЛИЗ ГЛАГОЛОВ (САМЫЙ ВАЖНЫЙ!)
-        verb_gender, verb_reason = self._analyze_verbs_detailed(full_text)
-        if verb_gender != "unknown":
-            reasoning.extend(verb_reason)
-            return verb_gender, 3.0, reasoning
+            # 🔥 3. СТАТИЧЕСКИЕ ГЛАГОЛЫ
+            static_verbs_score = self._score_static_verbs(text)
+            scores['male'] += static_verbs_score['male'] * self.WEIGHTS['static_verbs']
+            scores['female'] += static_verbs_score['female'] * self.WEIGHTS['static_verbs']
+            reasoning.extend(static_verbs_score['reasons'])
 
-        # 🔥 2. ПАТТЕРНЫ С АВТООПРЕДЕЛЕНИЕМ ПО ГЛАГОЛУ
-        for pattern, (gender_type, weight) in self.config.patterns.items():
-            match = re.search(pattern, full_text)
-            if match:
-                if gender_type == "verb_gender":
-                    verb = match.group(1) if match.groups() else ""
-                    detected_gender = self._detect_gender_by_verb(verb)
-                    if detected_gender != "unknown":
-                        reasoning.append(f"Паттерн глагола: '{verb}' → {detected_gender}")
-                        return detected_gender, weight, reasoning
+            # 🔥 4. КОНТЕКСТНЫЕ УКАЗАТЕЛИ С ИМЕНАМИ
+            context_name_score = self._score_context_name_indicators(text)
+            scores['male'] += context_name_score['male'] * self.WEIGHTS['context_name_indicators']
+            scores['female'] += context_name_score['female'] * self.WEIGHTS['context_name_indicators']
+            reasoning.extend(context_name_score['reasons'])
 
-        # 🔥 3. МЕСТОИМЕНИЯ (менее надежно)
-        male_pronouns = len(re.findall(r'\bон[ауе]?\b', full_text))
-        female_pronouns = len(re.findall(r'\bона\b', full_text))
+            # 🔥 5. ДИНАМИЧЕСКИЕ ГЛАГОЛЫ
+            dynamic_verbs_score = self._score_dynamic_verbs(text)
+            scores['male'] += dynamic_verbs_score['male'] * self.WEIGHTS['dynamic_verbs']
+            scores['female'] += dynamic_verbs_score['female'] * self.WEIGHTS['dynamic_verbs']
+            reasoning.extend(dynamic_verbs_score['reasons'])
 
-        if male_pronouns > 0 or female_pronouns > 0:
-            reasoning.append(f"Местоимения: 👨={male_pronouns}, 👩={female_pronouns}")
+            # 🔥 6. МЕСТОИМЕНИЯ
+            pronouns_score = self._score_pronouns(text)
+            scores['male'] += pronouns_score['male'] * self.WEIGHTS['pronoun_ratio']
+            scores['female'] += pronouns_score['female'] * self.WEIGHTS['pronoun_ratio']
+            reasoning.extend(pronouns_score['reasons'])
 
-            if male_pronouns > female_pronouns * 2:
-                reasoning.append("Преобладают мужские местоимения → male")
-                return "male", 1.5, reasoning
-            elif female_pronouns > male_pronouns * 2:
-                reasoning.append("Преобладают женские местоимения → female")
-                return "female", 1.5, reasoning
+            # 🔥 7. КОНТЕКСТ ДИАЛОГА
+            dialogue_score = self._score_dialogue_context()
+            scores['male'] += dialogue_score['male'] * self.WEIGHTS['dialogue_context']
+            scores['female'] += dialogue_score['female'] * self.WEIGHTS['dialogue_context']
+            reasoning.extend(dialogue_score['reasons'])
 
-        # 🔥 4. ИМЕНА (самый ненадежный - используем только как доп. признак)
-        name_gender, name_reason = self._analyze_names_detailed(full_text)
-        if name_gender != "unknown":
-            reasoning.extend(name_reason)
-            return name_gender, 1.2, reasoning
+            # 🔥 ОПРЕДЕЛЯЕМ ПОБЕДИТЕЛЯ
+            return self._determine_winner_simple(scores, reasoning)
 
-        reasoning.append("Не удалось определить")
-        return "unknown", 0.0, reasoning
+        except Exception as e:
+            return "unknown", 0.0, [f"Ошибка: {e}"]
 
-    def _analyze_verbs_detailed(self, text: str) -> Tuple[str, List[str]]:
-        """Детальный анализ глаголов"""
-        reasoning = []
+    def _score_explicit_pronoun_verb(self, text: str) -> Dict:
+        """Поиск конструкций 'глагол + я'"""
+        score = {'male': 0, 'female': 0, 'reasons': []}
 
-        # Ищем конкретные глаголы
-        found_verbs = []
-        for verb in self.config.female_verbs:
-            if re.search(rf'\b{verb}\b', text):
-                found_verbs.append((verb, "female"))
+        try:
+            if " я" not in text and "я " not in text:
+                return score
 
-        for verb in self.config.male_verbs:
-            if re.search(rf'\b{verb}\b', text):
-                found_verbs.append((verb, "male"))
+            patterns = [
+                (r'(\S+л)\s+я\b', 'male'),  # "сказал я"
+                (r'(\S+ла)\s+я\b', 'female'),  # "сказала я"
+                (r'\bя\s+(\S+л)\b', 'male'),  # "я сказал"
+                (r'\bя\s+(\S+ла)\b', 'female'),  # "я сказала"
+                (r'\bя\s+(\S+лся)\b', 'male'),  # "я оказался"
+                (r'\bя\s+(\S+лась)\b', 'female')  # "я оказалась"
+            ]
 
-        if found_verbs:
-            # Берем первый найденный глагол (самый надежный)
-            verb, gender = found_verbs[0]
-            reasoning.append(f"Найден глагол: '{verb}' → {gender}")
-            return gender, reasoning
+            for pattern, gender in patterns:
+                matches = re.findall(pattern, text)
+                for verb in matches:
+                    if gender == 'male':
+                        score['male'] += 1
+                        score['reasons'].append(f"Явный: '{verb} я'")
+                    else:
+                        score['female'] += 1
+                        score['reasons'].append(f"Явный: '{verb} я'")
 
-        reasoning.append("Глаголы не найдены")
-        return "unknown", reasoning
+        except re.error:
+            pass
 
-    def _analyze_names_detailed(self, text: str) -> Tuple[str, List[str]]:
-        """Детальный анализ имен"""
-        reasoning = []
-        found_names = []
+        return score
 
-        for name in self.config.female_names:
-            if re.search(rf'\b{name}\b', text, re.IGNORECASE):
-                found_names.append((name, "female"))
+    def _score_verb_endings(self, text: str) -> Dict:
+        """Анализ окончаний"""
+        score = {'male': 0, 'female': 0, 'reasons': []}
 
-        for name in self.config.male_names:
-            if re.search(rf'\b{name}\b', text, re.IGNORECASE):
-                found_names.append((name, "male"))
+        try:
+            male_patterns = [r'\b\S+л\b', r'\b\S+лся\b']
+            female_patterns = [r'\b\S+ла\b', r'\b\S+лась\b']
 
-        if found_names:
-            name, gender = found_names[0]
-            reasoning.append(f"Найдено имя: '{name}' → {gender}")
-            return gender, reasoning
+            male_count = sum(len(re.findall(pattern, text)) for pattern in male_patterns)
+            female_count = sum(len(re.findall(pattern, text)) for pattern in female_patterns)
 
-        reasoning.append("Имена не найдены")
-        return "unknown", reasoning
+            score['male'] = male_count
+            score['female'] = female_count
 
-    def _detect_gender_by_verb(self, verb: str) -> str:
-        """Определяет пол по окончанию глагола"""
-        if verb.endswith('ла'):  # сказала, доложила, сообщила
-            return "female"
-        elif verb.endswith('л'):  # сказал, доложил, сообщил
-            return "male"
-        return "unknown"
+            if male_count > 0:
+                score['reasons'].append(f"Глаголы м.р.: {male_count}")
+            if female_count > 0:
+                score['reasons'].append(f"Глаголы ж.р.: {female_count}")
+
+        except Exception:
+            pass
+
+        return score
+
+    def _score_static_verbs(self, text: str) -> Dict:
+        """Глаголы из конфига"""
+        score = {'male': 0, 'female': 0, 'reasons': []}
+
+        try:
+            for verb in self.config.male_verbs:
+                if re.search(rf'\b{re.escape(verb)}\b', text):
+                    score['male'] += 1
+                    score['reasons'].append(f"Глагол м.р.: '{verb}'")
+
+            for verb in self.config.female_verbs:
+                if re.search(rf'\b{re.escape(verb)}\b', text):
+                    score['female'] += 1
+                    score['reasons'].append(f"Глагол ж.р.: '{verb}'")
+
+        except Exception:
+            pass
+
+        return score
+
+    def _score_context_name_indicators(self, text: str) -> Dict:
+        """Контекстные указатели"""
+        score = {'male': 0, 'female': 0, 'reasons': []}
+
+        try:
+            if re.search(r'\bдевушка\b', text):
+                score['female'] += 1
+                score['reasons'].append("Контекст: 'девушка'")
+
+            if re.search(r'\bженский\b', text):
+                score['female'] += 1
+                score['reasons'].append("Контекст: 'женский'")
+
+            if re.search(r'\bмужчин', text):
+                score['male'] += 1
+                score['reasons'].append("Контекст: 'мужчин'")
+
+        except Exception:
+            pass
+
+        return score
+
+    def _score_dynamic_verbs(self, text: str) -> Dict:
+        """Глаголы из словаря"""
+        score = {'male': 0, 'female': 0, 'reasons': []}
+
+        try:
+            for verb in getattr(self.verb_dictionary, 'male_verbs', set()):
+                safe_verb = re.escape(verb)
+                if re.search(rf'\b{safe_verb}\b', text):
+                    score['male'] += 1
+                    score['reasons'].append(f"Словарь м.р.: '{verb}'")
+
+            for verb in getattr(self.verb_dictionary, 'female_verbs', set()):
+                safe_verb = re.escape(verb)
+                if re.search(rf'\b{safe_verb}\b', text):
+                    score['female'] += 1
+                    score['reasons'].append(f"Словарь ж.р.: '{verb}'")
+
+        except Exception:
+            pass
+
+        return score
+
+    def _score_pronouns(self, text: str) -> Dict:
+        """Местоимения"""
+        score = {'male': 0, 'female': 0, 'reasons': []}
+
+        try:
+            male_count = len(re.findall(r'\bон\b', text))
+            female_count = len(re.findall(r'\bона\b', text))
+
+            score['male'] = male_count
+            score['female'] = female_count
+
+            if male_count > 0 or female_count > 0:
+                score['reasons'].append(f"Местоимения: м={male_count}, ж={female_count}")
+
+        except Exception:
+            pass
+
+        return score
+
+    def _score_dialogue_context(self) -> Dict:
+        """Контекст диалога"""
+        score = {'male': 0, 'female': 0, 'reasons': []}
+
+        if self.last_speaker and self.last_speaker != "narrator":
+            if self.last_speaker == "male":
+                score['female'] += 1
+                score['reasons'].append("Контекст: предыдущий male")
+            else:
+                score['male'] += 1
+                score['reasons'].append("Контекст: предыдущий female")
+
+        return score
+
+    def _determine_winner_simple(self, scores: Dict, reasoning: List[str]) -> Tuple[str, float, List[str]]:
+        """ПРОСТОЕ ОПРЕДЕЛЕНИЕ ПОБЕДИТЕЛЯ"""
+        try:
+            total_male = scores['male']
+            total_female = scores['female']
+
+            if total_male == 0 and total_female == 0:
+                return "unknown", 0.0, reasoning + ["Нет доказательств"]
+
+            if total_male > total_female:
+                confidence = (total_male - total_female) / max(total_male + total_female, 1)
+                reasoning.append(f"РЕШЕНИЕ: male ({total_male} > {total_female})")
+                return "male", confidence, reasoning
+            elif total_female > total_male:
+                confidence = (total_female - total_male) / max(total_male + total_female, 1)
+                reasoning.append(f"РЕШЕНИЕ: female ({total_female} > {total_male})")
+                return "female", confidence, reasoning
+            else:
+                reasoning.append(f"НИЧЬЯ: male={total_male}, female={total_female}")
+                return "unknown", 0.0, reasoning
+
+        except Exception as e:
+            return "unknown", 0.0, [f"Ошибка: {e}"]
+
+    def _smart_fallback(self, line: Line, previous_reasons: List[str]) -> Tuple[str, str]:
+        """УМНЫЙ ФОЛБЭК"""
+        text_lower = line.original.lower()
+
+        male_verbs = len(re.findall(r'\b\S+л\b', text_lower))
+        female_verbs = len(re.findall(r'\b\S+la\b', text_lower))
+
+        if male_verbs > female_verbs:
+            return "male", f"глаголы м.р. ({male_verbs} vs {female_verbs})"
+        elif female_verbs > male_verbs:
+            return "female", f"глаголы ж.р. ({female_verbs} vs {male_verbs})"
+
+        if self.last_speaker and self.last_speaker != "narrator":
+            return "female" if self.last_speaker == "male" else "male", "чередование"
+
+        return "male", "умолчание"
 
     def _log_statistics(self, ubf: UserBookFormat):
-        print("\n📊 Статистика SpeakerResolver:")
-        print("=" * 40)
+        """Логирование статистики"""
+        try:
+            print("\n📊 Статистика SpeakerResolver:")
+            print("=" * 40)
 
-        total_lines = len(ubf.lines)
-        dialogue_lines = self.stats.get('dialogue_lines', 0)
+            total_lines = len(ubf.lines)
+            dialogue_lines = self.stats.get('dialogue_lines', 0)
 
-        print(f"Всего строк: {total_lines}")
-        print(f"Диалоговых: {dialogue_lines}")
+            print(f"Всего строк: {total_lines}")
+            print(f"Диалоговых: {dialogue_lines}")
 
-        if dialogue_lines > 0:
-            print(f"Определено аналитикой: {self.stats.get('resolved', 0)}")
-            print(f"Из контекста: {self.stats.get('from_context', 0)}")
-            print(f"Фолбэк: {self.stats.get('fallback', 0)}")
+            if dialogue_lines > 0:
+                print(f"Определено аналитикой: {self.stats.get('resolved', 0)}")
+                print(f"Из контекста: {self.stats.get('from_context', 0)}")
+                print(f"Фолбэк: {self.stats.get('fallback', 0)}")
 
-        # Анализ качества
-        print("\n🔍 АНАЛИЗ КАЧЕСТВА:")
-        dialogue_lines_list = [l for l in ubf.lines if l.type == "dialogue"]
+            # Распределение спикеров
+            speakers = {}
+            for line in ubf.lines:
+                if line.speaker:
+                    speakers[line.speaker] = speakers.get(line.speaker, 0) + 1
 
-        correct = 0
-        incorrect = 0
+            print("\nРаспределение спикеров:")
+            for speaker, count in speakers.items():
+                pct = (count / max(total_lines, 1)) * 100
+                print(f"  {speaker}: {count} строк ({pct:.1f}%)")
 
-        for line in dialogue_lines_list:
-            text_lower = line.original.lower()
-            expected = None
-
-            # Определяем ожидаемый пол по глаголам
-            if any(verb in text_lower for verb in self.config.male_verbs):
-                expected = "male"
-            elif any(verb in text_lower for verb in self.config.female_verbs):
-                expected = "female"
-
-            if expected:
-                if line.speaker == expected:
-                    correct += 1
-                else:
-                    incorrect += 1
-                    print(f"❌ Line: {text_lower[:60]}...")
-                    print(f"   Ожидалось: {expected}, Получено: {line.speaker}")
-
-        if correct + incorrect > 0:
-            accuracy = (correct / (correct + incorrect)) * 100
-            print(f"Точность: {correct}/{correct + incorrect} ({accuracy:.1f}%)")
-
-        # Распределение спикеров
-        speakers = {}
-        for line in ubf.lines:
-            if line.speaker:
-                speakers[line.speaker] = speakers.get(line.speaker, 0) + 1
-
-        print("\nРаспределение спикеров:")
-        for speaker, count in speakers.items():
-            pct = (count / total_lines) * 100
-            print(f"  {speaker}: {count} строк ({pct:.1f}%)")
+        except Exception as e:
+            print(f"⚠️ Ошибка статистики: {e}")
