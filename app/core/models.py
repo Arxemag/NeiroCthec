@@ -1,63 +1,49 @@
-# core/models.py
-from dataclasses import dataclass, field
-from typing import Optional, List
-from enum import Enum
+from dataclasses import dataclass
+from typing import List, Optional
 
 
-class SpeakerType(Enum):
-    NARRATOR = "narrator"
-    MALE = "male"
-    FEMALE = "female"
-    UNKNOWN = "unknown"
+# ===== Stage 0 =====
+
+@dataclass(frozen=True)
+class NormalizedBook:
+    raw_text: str
+    lines: List[str]
+    source_format: str
 
 
-@dataclass(slots=True)
-class EmotionProfile:
-    energy: float = 1.0
-    tempo: float = 1.0
-    pitch: float = 0.0
-    pause_before: int = 0
-    pause_after: int = 0
+# ===== Stage 1.1 =====
+
+@dataclass(frozen=True)
+class Chapter:
+    index: int
+    title: Optional[str]
+    lines: List[str]
 
 
-@dataclass(slots=True)
-class Remark:
-    text: str
+# ===== Stage 1.2 =====
 
-
-@dataclass(slots=True)
+@dataclass(frozen=True)
 class Line:
-    # Основные поля
-    idx: int
-    type: str  # "dialogue" или "narrator"
-    original: str
-    remarks: List[Remark]
-
-    # Поля для сегментов (ДОБАВЛЯЕМ СЮДА!)
-    is_segment: bool = False
-    segment_index: Optional[int] = None
-    segment_total: Optional[int] = None
-    full_original: Optional[str] = None
-    base_line_id: Optional[int] = None
-
-    # Результаты обработки
-    speaker: Optional[str] = None  # "male", "female", "narrator"
-    emotion: Optional[EmotionProfile] = None
-    audio_path: Optional[str] = None
-
-    # Внутренние флаги (не slots, используем property)
-    @property
-    def _logged(self) -> bool:
-        return getattr(self, '__logged', False)
-
-    @_logged.setter
-    def _logged(self, value: bool):
-        setattr(self, '__logged', value)
+    id: int
+    chapter_id: int
+    type: str            # narrator | dialogue
+    original: str        # IMMUTABLE
 
 
-@dataclass(slots=True)
-class UserBookFormat:
-    user_id: int
-    book_id: int
-    version: str
-    lines: List[Line]
+# ===== Stage 1.3–1.5 =====
+
+@dataclass
+class Segment:
+    id: int
+    line_id: int
+    kind: str            # speech | remark | narration
+
+    original_text: str   # ⊂ Line.original (immutable)
+    char_start: int
+    char_end: int
+
+    # Stage 1.4
+    tts_text: Optional[str] = None
+
+    # Stage 1.5
+    stress_map: Optional[dict] = None
