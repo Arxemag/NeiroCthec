@@ -1,14 +1,13 @@
 # debug_pipeline.py
 from pathlib import Path
 import sys
-import shutil
 import time
 import torch
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from core.pipeline.stage1_parser import StructuralParser
-from core.pipeline.stage2_speaker import SpeakerResolver
+from app.core.pipeline.old_stage.stage1_parser import StructuralParser
+from app.core.pipeline.old_stage.stage2_speaker import SpeakerResolver
 from core.pipeline.stage3_emotion import EmotionResolver
 from core.pipeline.stage4_voice import VoiceSynthesizer
 # Добавляем Stage 4.5 обратно

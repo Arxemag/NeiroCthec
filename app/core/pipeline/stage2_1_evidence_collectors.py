@@ -1,6 +1,6 @@
 # core/pipeline/stage2_1_evidence_collectors.py
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict  # 🔥 ДОБАВЛЯЕМ
 import re
 from dataclasses import dataclass
 from core.models import Line
