@@ -1,6 +1,6 @@
 # core/models.py
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Literal
 
 
 # ===== Stage 0 =====
@@ -46,9 +46,20 @@ class Segment:
     original_text: str
     char_start: int
     char_end: int
+
+    # === Stage 1.5 ===
     tts_text: Optional[str] = None
-    stress_map: Optional[dict] = None
-    speaker: Optional[str] = None  # 🔥 ДОБАВЛЯЕМ СПИКЕРА ДЛЯ СЕГМЕНТОВ
+    stress_map: Optional[List[dict]] = None
+    stress_applied: bool = False
+
+    # === Stage 2+ ===
+    speaker: Optional[str] = None
+
+    # === Stage 3 ===
+    speech_meta: Optional['SpeechMeta'] = None
+
+    # 🔥 Stage 3 — дирижёр озвучки
+    tts_meta: Optional[TTSMeta] = None
 
 
 @dataclass
@@ -60,3 +71,52 @@ class Remark:
 @dataclass
 class UserBookFormat:
     lines: List[Line]
+
+# ===== Stage 3 =====
+
+@dataclass
+class SpeechMeta:
+    # Просодия
+    tempo: float = 1.0
+    pitch: float = 0.0
+    energy: float = 1.0
+    volume: float = 1.0
+
+    # Режимы
+    whisper: bool = False
+
+    # Паузы (мс)
+    pause_before: int = 0
+    pause_after: int = 0
+
+    # Уважать ударения Stage 1.5
+    respect_stress: bool = True
+
+    # Отладка / причины
+    tags: List[str] = None
+
+TTSVolume = Literal["whisper", "quiet", "normal", "loud"]
+TTSTempo = Literal["slow", "normal", "fast"]
+TTSEmotion = Literal[
+    "neutral",
+    "sad",
+    "angry",
+    "happy",
+    "fear",
+    "irony",
+    "tension"
+]
+
+
+@dataclass
+class TTSMeta:
+    volume: TTSVolume = "normal"
+    tempo: TTSTempo = "normal"
+    emotion: TTSEmotion = "neutral"
+
+    emphasis: Optional[str] = None
+    pause_before_ms: int = 0
+    pause_after_ms: int = 0
+
+    # чисто для дебага — ПОЧЕМУ принято решение
+    reason: Optional[str] = None

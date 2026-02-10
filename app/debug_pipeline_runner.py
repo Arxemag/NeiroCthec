@@ -9,13 +9,57 @@ from core.pipeline.stage1_1_chapter_parser import ChapterParser
 from core.pipeline.stage1_2_line_type_parser import LineTypeParser
 from core.pipeline.stage1_3_segment_analyzer import SegmentAnalyzer
 from core.pipeline.stage1_4_segment_text_adapter import SegmentTextAdapter
-from core.pipeline.stage1_5_stress_placeholder import StressPlaceholder
+from core.pipeline.stage1_5_stress import StressPlaceholder
 
 from core.models import UserBookFormat, Remark, Line
 from core.pipeline.stage2_speaker_resolver import SpeakerResolver, SpeakerResolverConfig
 
 # 🔥 ИМПОРТИРУЕМ НОВЫЙ СТЕЙДЖ
 from core.pipeline.stage2_5_character_collector import run_character_collection
+
+class TTSDirector:
+    def apply(self, segment: Segment):
+        text = segment.original_text.lower()
+
+        meta = TTSMeta()
+
+        # 🔊 ГРОМКОСТЬ
+        if "прошептал" in text or "шепотом" in text:
+            meta.volume = "whisper"
+            meta.reason = "указание на шепот"
+
+        elif "тихо сказал" in text or "сказал тихо" in text:
+            meta.volume = "quiet"
+            meta.reason = "указание на тихую речь"
+
+        elif "закричал" in text or "воскликнул" in text:
+            meta.volume = "loud"
+            meta.emotion = "angry"
+            meta.reason = "крик / восклицание"
+
+        # 😡 ЭМОЦИИ
+        if "злобно" in text:
+            meta.emotion = "angry"
+            meta.reason = "злобно"
+
+        elif "грустно" in text or "печально" in text:
+            meta.emotion = "sad"
+            meta.reason = "грусть"
+
+        elif "с усмешкой" in text or "иронично" in text:
+            meta.emotion = "irony"
+            meta.reason = "ирония"
+
+        # ⏸ ПАУЗЫ
+        if segment.original_text.endswith("..."):
+            meta.pause_after_ms = 600
+            meta.reason = (meta.reason or "") + " | многоточие"
+
+        if segment.original_text.startswith("—"):
+            meta.pause_before_ms = 200
+
+        segment.tts_meta = meta
+
 
 
 def save_to_file(filename: str, content: str, stage_name: str):
@@ -405,6 +449,30 @@ def debug_run(book_path: str):
 Книга: {book_name}
 Время обработки: {timestamp}
 Общее количество строк: {total_lines}
+
+# ---------- Stage 3 ----------
+print("\n🎼 Stage 3 — TTS Director")
+
+director = TTSDirector()
+
+for seg in all_segments:
+    director.apply(seg)
+
+director_content = "TTS META (первые 50 строк)\n"
+director_content += "=" * 50 + "\n\n"
+
+for seg in all_segments:
+    director_content += (
+        f"[L{seg.line_id}:{seg.kind}] {seg.speaker}\n"
+        f"TEXT: {seg.original_text}\n"
+        f"META: {seg.tts_meta}\n\n"
+    )
+
+save_to_file(
+    f"{book_name}_stage3_tts_director.txt",
+    director_content,
+    "Stage 3 - TTS Director"
+)
 
 СТАТИСТИКА:
 - Диалоговых строк: {dialogue_count} ({dialogue_count / total_lines * 100:.1f}%)

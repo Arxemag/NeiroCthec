@@ -8,7 +8,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from app.core.pipeline.old_stage.stage1_parser import StructuralParser
 from app.core.pipeline.old_stage.stage2_speaker import SpeakerResolver
-from core.pipeline.stage3_emotion import EmotionResolver
+from core.pipeline.stage3_speech_director import EmotionResolver
 from core.pipeline.stage4_voice import VoiceSynthesizer
 # Добавляем Stage 4.5 обратно
 from core.pipeline.stage4_5_enhancer import create_enhancer
