@@ -1,8 +1,21 @@
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-RUN apt-get update && apt-get install -y \
-    python3.10 python3-pip python3.10-venv ffmpeg libsndfile1 \
-    && rm -rf /var/lib/apt/lists/*
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN set -eux; \
+    for i in {1..5}; do \
+        apt-get update -o Acquire::Retries=3 && break; \
+        echo "apt-get update failed (attempt $i), retrying..."; \
+        sleep 5; \
+    done; \
+    apt-get install -y --no-install-recommends \
+        python3.10 \
+        python3-pip \
+        python3.10-venv \
+        ffmpeg \
+        libsndfile1; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv
 
