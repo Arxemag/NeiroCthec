@@ -1,11 +1,8 @@
 from fastapi import FastAPI
 
-from api.routes import books, chapters
+from api.routes.books import router as books_router
+from api.routes.chapters import router as chapters_router
 
-app = FastAPI(
-    title="Book TTS API",
-    version="0.1.0"
-)
-
-app.include_router(books.router, prefix="/api/books", tags=["books"])
-app.include_router(chapters.router, prefix="/api/chapters", tags=["chapters"])
+app = FastAPI(title="NeiroCthec API")
+app.include_router(books_router, prefix="/books", tags=["books"])
+app.include_router(chapters_router, prefix="/chapters", tags=["chapters"])

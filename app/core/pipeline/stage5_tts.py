@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List
 import numpy as np
 import soundfile as sf
+from urllib.parse import urlparse
 
 from core.models import UserBookFormat, Line
 
@@ -114,11 +115,42 @@ class Stage5Assembler:
         # Сортируем по ключу
         return sorted(lines_with_sort_key, key=lambda x: x[0])
 
+    def _stage4_uri_to_local_path(self, uri: str) -> Path | None:
+        """Преобразует URI Stage 4 (s3://audio/...) в локальный путь смонтированного object storage."""
+        if not uri:
+            return None
+
+        parsed = urlparse(uri)
+        if parsed.scheme != "s3":
+            return None
+
+        relative = parsed.path.lstrip("/")
+        if not relative:
+            return None
+
+        candidates = [
+            Path("storage/object") / relative,
+            Path("storage") / relative,
+        ]
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        return None
+
     def _find_audio_file(self, line: Line) -> Path | None:
         """Находит аудио файл в разных местах"""
-        # 1. Проверяем путь из line.audio_path
-        if line.audio_path:
-            path = Path(line.audio_path)
+        stage4_uri = getattr(line, "stage4_audio_uri", None) or getattr(line, "audio_path", None)
+        if isinstance(stage4_uri, str) and stage4_uri.startswith("s3://"):
+            local_path = self._stage4_uri_to_local_path(stage4_uri)
+            if local_path:
+                return local_path
+
+        # 1. Проверяем локальный путь из line.audio_path
+        line_audio_path = getattr(line, "audio_path", None)
+        if line_audio_path:
+            path = Path(line_audio_path)
             if path.exists():
                 return path
 
@@ -185,12 +217,13 @@ class Stage5Assembler:
                 return int(50 * self.SAMPLE_RATE / 1000)  # 50ms между сегментами
 
         # Пауза из эмоций
-        if line.emotion and line.emotion.pause_after:
+        emotion = getattr(line, "emotion", None)
+        if emotion and getattr(emotion, "pause_after", None):
             # Для диалогов больше пауза, для повествования меньше
             if line.type == "dialogue":
-                return int(line.emotion.pause_after * self.SAMPLE_RATE / 1000)
+                return int(emotion.pause_after * self.SAMPLE_RATE / 1000)
             else:
-                return int((line.emotion.pause_after * 0.7) * self.SAMPLE_RATE / 1000)
+                return int((emotion.pause_after * 0.7) * self.SAMPLE_RATE / 1000)
 
         # Дефолтные паузы
         if line.type == "dialogue":

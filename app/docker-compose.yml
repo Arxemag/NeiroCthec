@@ -1,20 +1,34 @@
 version: '3.8'
 
 services:
-  tts:
+  main-service:
     build:
-      context: ./app
+      context: .
       dockerfile: Dockerfile
+    command: python main.py
+    environment:
+      - STAGE4_TTS_URL=http://stage4-tts:8010
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      - stage4-tts
+
+  stage4-tts:
+    build:
+      context: .
+      dockerfile: stage4_service/Dockerfile
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - STAGE4_MAX_GPU_JOBS=1
+      - STAGE4_WORKERS=1
+      - STAGE4_OBJECT_ROOT=/srv/storage/object
+      - STAGE4_OBJECT_URI_PREFIX=s3://audio
     volumes:
-      - ./storage:/app/storage
-      - tts_cache:/root/.cache/tts
-      # 🔥 ДОБАВЬТЕ ЭТИ СТРОКИ для монтирования исходного кода
-      - ./app/core:/app/core  # Монтирование всей папки core
-      - ./app/debug_pipeline.py:/app/debug_pipeline.py  # Монтирование файла
+      - ./storage:/srv/storage
+    ports:
+      - "8010:8010"
     deploy:
       resources:
         reservations:
@@ -23,5 +37,4 @@ services:
               count: 1
               capabilities: [gpu]
 
-volumes:
-  tts_cache:
+volumes: {}
