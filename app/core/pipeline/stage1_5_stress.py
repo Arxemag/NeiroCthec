@@ -1,5 +1,5 @@
 from typing import List, Dict
-import pymorphy3
+import importlib.util
 import re
 
 from core.resources.stress_dict_ru import STRESS_DICT
@@ -8,7 +8,11 @@ from core.resources.stress_dict_ru import STRESS_DICT
 STRESS = "\u0301"
 VOWELS = "аеёиоуыэюя"
 
-_morph = pymorphy3.MorphAnalyzer()
+_spec = importlib.util.find_spec("pymorphy3")
+_morph = None
+if _spec is not None:
+    import pymorphy3
+    _morph = pymorphy3.MorphAnalyzer()
 
 # =========================
 # Utilities
@@ -28,6 +32,9 @@ def inject_stress(word: str, syllable_index: int) -> str | None:
 
 
 def lemmatize(word: str) -> str | None:
+    if _morph is None:
+        return None
+
     parsed = _morph.parse(word)
     if not parsed:
         return None
@@ -99,9 +106,12 @@ class StressPlaceholder:
     def apply(self, segment):
         if not self.enabled or not segment.tts_text:
             segment.stress_map = []
-            return
+            segment.stress_applied = False
+            return segment
 
         tts_text, stress_map = process_segment_text(segment.tts_text)
 
         segment.tts_text = tts_text
         segment.stress_map = stress_map
+        segment.stress_applied = bool(stress_map)
+        return segment

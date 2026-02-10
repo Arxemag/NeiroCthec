@@ -113,7 +113,7 @@ class SpeakerResolver:
             self._calculate_book_gender_stats(ubf)
 
             # 🔥 ОБРАБОТКА С ДЕБАГ-ВЫВОДОМ
-            for i, line in enumerate(sorted(ubf.lines, key=lambda l: l.idx)):
+            for i, line in enumerate(sorted(ubf.lines, key=lambda l: l.idx if l.idx is not None else l.id)):
                 if self.config.debug_detailed and line.type == "dialogue":
                     print(f"\n--- Line {i:04d} ---")
                     print(f"Text: {line.original[:100]}...")
