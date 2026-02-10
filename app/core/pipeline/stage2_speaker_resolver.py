@@ -260,8 +260,8 @@ class SpeakerResolver:
                 return score
 
             patterns = [
-                (r'(\S+л)\s+я\b', 'male'),  # "сказал я"
-                (r'(\S+ла)\s+я\b', 'female'),  # "сказала я"
+                (r'(\S+л)[,–—-]*\s+я\b', 'male'),  # "сказал я" (+ пунктуация)
+                (r'(\S+ла)[,–—-]*\s+я\b', 'female'),  # "сказала я" (+ пунктуация)
                 (r'\bя\s+(\S+л)\b', 'male'),  # "я сказал"
                 (r'\bя\s+(\S+ла)\b', 'female'),  # "я сказала"
                 (r'\bя\s+(\S+лся)\b', 'male'),  # "я оказался"
@@ -433,7 +433,7 @@ class SpeakerResolver:
         text_lower = line.original.lower()
 
         male_verbs = len(re.findall(r'\b\S+л\b', text_lower))
-        female_verbs = len(re.findall(r'\b\S+la\b', text_lower))
+        female_verbs = len(re.findall(r'\b\S+ла\b', text_lower))
 
         if male_verbs > female_verbs:
             return "male", f"глаголы м.р. ({male_verbs} vs {female_verbs})"

@@ -48,18 +48,20 @@ class SegmentAnalyzer:
             ]
 
         # Разбиваем текст на части: речь-ремарка-речь-ремарка-...
-        last_pos = 0
+        seg_start = 0  # начало текущего speech сегмента в исходной строке
+        cursor = 0     # сколько текста уже добавлено в буфер
         current_speech_parts = []
 
-        for i, match in enumerate(matches):
+        for match in matches:
             start, end = match.start(), match.end()
 
             # Текст ДО ремарки (если есть)
-            if start > last_pos:
-                current_speech_parts.append(text[last_pos:start])
+            if start > cursor:
+                current_speech_parts.append(text[cursor:start])
 
             # 🔥 Ключевое изменение: ремарка остается частью речи
             current_speech_parts.append(text[start:end])
+            cursor = end
 
             # Проверяем, заканчивается ли здесь реплика (по кавычке или точке)
             next_text = text[end:] if end < len(text) else ""
@@ -72,7 +74,7 @@ class SegmentAnalyzer:
                         line_id=line.id,
                         kind="speech",
                         original_text=speech_text,
-                        char_start=last_pos,
+                        char_start=seg_start,
                         char_end=end,
                     )
                 )
@@ -92,11 +94,12 @@ class SegmentAnalyzer:
                 seg_id += 1
 
                 current_speech_parts = []
-                last_pos = end
+                seg_start = end
 
         # Остаток текста после последней ремарки
-        if last_pos < len(text) or current_speech_parts:
-            remaining_text = "".join(current_speech_parts) + text[last_pos:]
+        tail_text = text[cursor:]
+        if current_speech_parts or tail_text.strip():
+            remaining_text = "".join(current_speech_parts) + tail_text
             if remaining_text.strip():
                 segments.append(
                     Segment(
@@ -104,7 +107,7 @@ class SegmentAnalyzer:
                         line_id=line.id,
                         kind="speech",
                         original_text=remaining_text,
-                        char_start=last_pos,
+                        char_start=seg_start,
                         char_end=len(text),
                     )
                 )
