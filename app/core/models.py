@@ -59,7 +59,7 @@ class Segment:
     speech_meta: Optional['SpeechMeta'] = None
 
     # 🔥 Stage 3 — дирижёр озвучки
-    tts_meta: Optional[TTSMeta] = None
+    tts_meta: Optional['TTSMeta'] = None
 
 
 @dataclass
