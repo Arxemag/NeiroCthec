@@ -36,6 +36,12 @@ class TTSDirector:
             meta.emotion = "irony"
             meta.reason = "ирония"
 
+        # Командная подача (ускоренный темп)
+        if "скомандовал" in text or "скомандывал" in text or "приказал" in text:
+            meta.tempo = "fast"
+            meta.emotion = "tension" if meta.emotion == "neutral" else meta.emotion
+            meta.reason = "командная интонация"
+
         # Паузы
         if segment.original_text.endswith("..."):
             meta.pause_after_ms = 600

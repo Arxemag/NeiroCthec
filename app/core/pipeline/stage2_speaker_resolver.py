@@ -209,6 +209,15 @@ class SpeakerResolver:
             scores['female'] += explicit_score['female'] * self.WEIGHTS['explicit_pronoun_verb']
             reasoning.extend(explicit_score['reasons'])
 
+            # Если есть явная самореференция "глагол + я" только одного рода,
+            # считаем это приоритетным сигналом спикера.
+            if explicit_score['male'] > 0 and explicit_score['female'] == 0:
+                reasoning.append('Приоритет: явное "глагол+я" -> male')
+                return 'male', 0.95, reasoning
+            if explicit_score['female'] > 0 and explicit_score['male'] == 0:
+                reasoning.append('Приоритет: явное "глагол+я" -> female')
+                return 'female', 0.95, reasoning
+
             # 🔥 2. ОКОНЧАНИЯ ГЛАГОЛОВ
             endings_score = self._score_verb_endings(text)
             scores['male'] += endings_score['male'] * self.WEIGHTS['verb_endings']
