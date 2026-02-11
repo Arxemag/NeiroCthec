@@ -5,11 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /srv
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    libsndfile1 \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY stage4_service/requirements.txt /srv/requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /srv/requirements.txt
 
