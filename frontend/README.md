@@ -64,3 +64,5 @@ docker compose down -v
 
 Все необходимые значения для контейнеров уже прописаны в `docker-compose.yml`.
 Если нужно изменить секреты/лимиты — отредактируйте переменные в сервисах `api`, `worker`, `api-migrate`.
+
+> Важно: корневой `docker-compose.yml` теперь также поднимает Python backend (`backend` на 8000 и `stage4-tts` на 8010), а этот README описывает именно frontend-stack.

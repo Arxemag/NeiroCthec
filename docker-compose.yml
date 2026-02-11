@@ -1,4 +1,5 @@
 services:
+  # Frontend stack (Next + Nest)
   postgres:
     image: postgres:16
     environment:
@@ -138,6 +139,60 @@ services:
     ports:
       - "3000:3000"
 
+  # Core python backend stack (FastAPI + Stage4 TTS)
+  py-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: neiro
+      POSTGRES_PASSWORD: neiro
+      POSTGRES_DB: neirocthec
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neiro -d neirocthec"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - py_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+
+  backend:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.api
+    command: python3 -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql+psycopg2://neiro:neiro@py-postgres:5432/neirocthec
+      STAGE4_TTS_URL: http://stage4-tts:8010
+    volumes:
+      - ./app:/app
+      - ./app/storage:/app/storage
+    depends_on:
+      py-postgres:
+        condition: service_healthy
+      stage4-tts:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  stage4-tts:
+    build:
+      context: ./app
+      dockerfile: stage4_service/Dockerfile
+    environment:
+      CORE_INTERNAL_URL: http://backend:8000/internal
+      STAGE4_MAX_GPU_JOBS: 1
+      STAGE4_WORKERS: 1
+      STAGE4_OBJECT_ROOT: /srv/storage/object
+      STAGE4_OBJECT_URI_PREFIX: s3://audio
+    command: python3 -m uvicorn stage4_service.app:app --host 0.0.0.0 --port 8010 --reload
+    volumes:
+      - ./app:/srv
+      - ./app/storage:/srv/storage
+    ports:
+      - "8010:8010"
+
 volumes:
   pgdata:
   miniodata:
+  py_postgres_data:
