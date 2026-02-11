@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, FileUp, History, Pencil, Trash2, X } from 'lucide-react';
-import { apiJson } from '../../../../lib/api';
+import { apiJson, API_BASE } from '../../../../lib/api';
 import { Button } from '../../../../components/ui';
 import { useParams, useRouter } from 'next/navigation';
 
@@ -75,8 +75,7 @@ export default function ProjectPage() {
   const streamSrc = useMemo(() => {
     const ready = audios.find((a) => a.status === 'ready');
     if (!ready) return null;
-    const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
-    return `${base}/api/audios/${ready.id}/stream`;
+    return `${API_BASE}/api/audios/${ready.id}/stream`;
   }, [audios]);
 
   async function loadAll() {

@@ -112,3 +112,6 @@ dmypy.json
 
 app.py
 app_xz.py
+# Allow frontend runtime helpers even with global lib/ ignore
+!frontend/apps/web/lib/
+!frontend/apps/web/lib/*.ts

@@ -1,0 +1,17 @@
+FROM node:20-alpine AS base
+WORKDIR /app
+
+COPY package*.json ./
+COPY apps/api/package*.json ./apps/api/
+COPY apps/web/package*.json ./apps/web/
+
+RUN npm ci
+
+COPY . .
+
+RUN npm run -w apps/api prisma:generate
+RUN npm run -w apps/api build
+
+EXPOSE 4000
+
+CMD ["node", "apps/api/dist/main.js"]

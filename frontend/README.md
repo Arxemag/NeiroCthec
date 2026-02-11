@@ -3,46 +3,57 @@
 Монорепозиторий с:
 - `apps/web`: Next.js (TypeScript) — лендинг и личный кабинет
 - `apps/api`: NestJS (TypeScript) — REST API, auth, проекты, голоса, аудио
-- `packages/shared`: общие типы/DTO (минимально для MVP)
 
-## Быстрый старт (локально)
+## Запуск целиком через Docker Compose
 
-### 1) Инфраструктура
+Теперь весь стек поднимается контейнерами отдельно:
+- `web` (Next.js, порт `3000`)
+- `api` (NestJS, порт `4000`)
+- `worker` (BullMQ worker)
+- `postgres` (порт `5432`)
+- `redis` (порт `6379`)
+- `minio` (S3 API `9000`, console `9001`)
 
-Поднять сервисы (Postgres, Redis, MinIO):
+### Быстрый старт
 
-```bash
-docker compose up -d
-```
-
-### 2) API
-
-В отдельном терминале:
-
-```bash
-cd apps/api
-npm install
-npm run prisma:generate
-npm run prisma:migrate
-npm run seed
-npm run dev
-```
-
-### 3) WEB
-
-В отдельном терминале:
+Из папки `frontend`:
 
 ```bash
-cd apps/web
-npm install
-npm run dev
+docker compose up --build -d
 ```
 
-## Важное про аудио
+Проверка:
 
-- В MVP аудио хранится **в S3-совместимом хранилище (MinIO)**, но доступ наружу не выдаётся.\n+- Воспроизведение идёт через защищённый endpoint `/api/audios/:id/stream`.\n+- Скачивание (download) не реализовано; для неактивной подписки ограничение жёстко проверяется на backend.
+```bash
+docker compose ps
+```
+
+Открыть:
+- `http://localhost:3000` — web
+- `http://localhost:4000/api/health` — API healthcheck
+- `http://localhost:9001` — MinIO console (`minio` / `minio12345`)
+
+### Остановка
+
+```bash
+docker compose down
+```
+
+Для полного сброса данных БД/MinIO:
+
+```bash
+docker compose down -v
+```
+
+## Что делает compose при старте
+
+- Ждёт готовность `postgres` и `redis` через healthcheck, затем стартует `minio`.
+- Запускает одноразовый контейнер `api-migrate`, который применяет Prisma-миграции.
+- После этого стартуют `api` и `worker`.
+- `web` стартует отдельным контейнером и работает с API через `NEXT_PUBLIC_API_BASE_URL`.
+- `web` использует проксирование `/api/*` внутри Next на `api:4000`, поэтому кнопки/действия UI ходят в backend через единый origin `http://localhost:3000/api/*`.
 
 ## Переменные окружения
 
-См. `.env.example` в корне и `apps/api/.env.example`, `apps/web/.env.example`.
-
+Все необходимые значения для контейнеров уже прописаны в `docker-compose.yml`.
+Если нужно изменить секреты/лимиты — отредактируйте переменные в сервисах `api`, `worker`, `api-migrate`.
