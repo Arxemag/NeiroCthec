@@ -8,13 +8,28 @@ from sqlalchemy.orm import Session
 from db.models import Book, BookStatus, Line, LineStatus, TTSTask
 
 
+DEFAULT_EMOTION = {
+    "energy": 1.0,
+    "tempo": 1.0,
+    "pitch": 0.0,
+    "pause_before": 0,
+    "pause_after": 150,
+}
+
+
 def run_stage0(db: Session, book: Book) -> None:
+    """Stage 0: source text -> Line rows. Idempotent for retries/restarts."""
     if book.status not in {BookStatus.uploaded, BookStatus.error}:
         return
 
     source = Path(book.source_path)
     if not source.exists():
         book.status = BookStatus.error
+        return
+
+    existing = db.scalar(select(func.count()).select_from(Line).where(Line.book_id == book.id)) or 0
+    if existing > 0:
+        book.status = BookStatus.parsing
         return
 
     book.status = BookStatus.parsing
@@ -39,12 +54,14 @@ def run_stage0(db: Session, book: Book) -> None:
 
 
 def run_stage1(db: Session, book: Book) -> None:
+    """Stage 1: structure pass."""
     lines = db.scalars(select(Line).where(Line.book_id == book.id, Line.tts_status == LineStatus.new)).all()
     for line in lines:
         line.tts_status = LineStatus.stage1_done
 
 
 def run_stage2(db: Session, book: Book) -> None:
+    """Stage 2 (2.0-2.3): speaker/type/segments normalization."""
     lines = db.scalars(select(Line).where(Line.book_id == book.id, Line.tts_status == LineStatus.stage1_done)).all()
     for line in lines:
         line.type = line.type or "narrator"
@@ -55,18 +72,25 @@ def run_stage2(db: Session, book: Book) -> None:
 
 
 def run_stage3(db: Session, book: Book) -> None:
+    """Stage 3: emotion metadata and TTS queue publication."""
     lines = db.scalars(select(Line).where(Line.book_id == book.id, Line.tts_status == LineStatus.stage2_done)).all()
     for line in lines:
-        line.emotion = line.emotion or {
-            "energy": 1.0,
-            "tempo": 1.0,
-            "pitch": 0.0,
-            "pause_before": 0,
-            "pause_after": 150,
-        }
+        line.emotion = line.emotion or dict(DEFAULT_EMOTION)
         line.tts_status = LineStatus.tts_pending
         if not line.tts_task:
-            db.add(TTSTask(line_id=line.id, payload={"line_id": line.id, "user_id": book.user_id, "book_id": book.id, "text": line.original, "emotion": line.emotion, "voice": line.speaker}))
+            db.add(
+                TTSTask(
+                    line_id=line.id,
+                    payload={
+                        "line_id": line.id,
+                        "user_id": book.user_id,
+                        "book_id": book.id,
+                        "text": line.original,
+                        "emotion": line.emotion,
+                        "voice": line.speaker,
+                    },
+                )
+            )
 
 
 def update_book_status(db: Session, book: Book) -> None:
@@ -80,14 +104,15 @@ def update_book_status(db: Session, book: Book) -> None:
     assembled = db.scalar(
         select(func.count()).select_from(Line).where(Line.book_id == book.id, Line.tts_status == LineStatus.assembled)
     ) or 0
+    tts_pending = db.scalar(
+        select(func.count()).select_from(Line).where(Line.book_id == book.id, Line.tts_status == LineStatus.tts_pending)
+    ) or 0
 
     if assembled == total:
         book.status = BookStatus.completed
     elif tts_done == total:
         book.status = BookStatus.assembling
-    elif tts_done > 0 or db.scalar(
-        select(func.count()).select_from(Line).where(Line.book_id == book.id, Line.tts_status == LineStatus.tts_pending)
-    ):
+    elif tts_done > 0 or tts_pending > 0:
         book.status = BookStatus.tts_processing
     else:
         book.status = BookStatus.analyzed
