@@ -22,7 +22,7 @@ class TTSRequest(BaseModel):
     task_id: str
     user_id: str
     book_id: str
-    line_id: int
+    line_id: str
     text: str = Field(min_length=1)
     speaker: str = "narrator"
     emotion: EmotionPayload = Field(default_factory=EmotionPayload)
