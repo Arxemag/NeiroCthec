@@ -38,6 +38,24 @@ except ImportError:
     def analyze_context(*args):
         return "unknown", []
 
+# 🔥 Подключение модулей Stage 2.1–2.4 (с безопасным fallback)
+try:
+    from .stage2_1_evidence_collectors import (
+        PatternEvidenceCollector,
+        PronounEvidenceCollector,
+        NameEvidenceCollector,
+    )
+    from .stage2_2_evidence_resolver import EvidenceResolver
+    from .stage2_3_context_manager import ContextManager
+    from .stage2_4_fallback_strategies import ContextAwareFallback
+except ImportError:
+    PatternEvidenceCollector = None
+    PronounEvidenceCollector = None
+    NameEvidenceCollector = None
+    EvidenceResolver = None
+    ContextManager = None
+    ContextAwareFallback = None
+
 
 @dataclass
 class SpeakerResolverConfig:
@@ -85,6 +103,31 @@ class SpeakerResolver:
         self.stats = defaultdict(int)
         self.logger = logging.getLogger(__name__)
         self.book_gender_stats = {'male': 0, 'female': 0, 'total': 0}
+
+        # Stage 2.1–2.4 оркестрация (если модули доступны)
+        self.context_manager = ContextManager() if ContextManager else None
+        self.evidence_resolver = EvidenceResolver(
+            confidence_threshold=self.config.confidence_threshold,
+            high_confidence_threshold=max(self.config.confidence_threshold + 0.2, 0.6),
+        ) if EvidenceResolver else None
+        self.fallback_strategy = ContextAwareFallback(
+            use_narrator_fallback=self.config.use_narrator_fallback
+        ) if ContextAwareFallback else None
+        self.evidence_collectors = []
+        if PatternEvidenceCollector:
+            pattern_map = {
+                r"\b(сказал|ответил|спросил|произнёс|произнес)\b": ("male", 1.0),
+                r"\b(сказала|ответила|спросила|произнесла)\b": ("female", 1.0),
+                r"\b(мужчина|парень|юноша)\b": ("male", 0.8),
+                r"\b(женщина|девушка)\b": ("female", 0.8),
+            }
+            self.evidence_collectors.append(PatternEvidenceCollector(pattern_map))
+        if PronounEvidenceCollector:
+            self.evidence_collectors.append(PronounEvidenceCollector(self.WEIGHTS))
+        if NameEvidenceCollector:
+            self.evidence_collectors.append(
+                NameEvidenceCollector(self.config.female_names, self.config.male_names, self.WEIGHTS['names'])
+            )
 
         # 🔥 ИНИЦИАЛИЗАЦИЯ ПО УМОЛЧАНИЮ
         if not hasattr(self.verb_dictionary, 'male_verbs'):
@@ -158,7 +201,15 @@ class SpeakerResolver:
 
             self.stats['dialogue_lines'] += 1
 
-            # 🔥 Сначала проверяем контекст сегмента
+            # 🔥 Сначала проверяем контекст сегмента (2.3) и локальный кэш
+            if self.context_manager:
+                context_speaker = self.context_manager.get_segment_speaker(line)
+                if context_speaker:
+                    line.speaker = context_speaker
+                    self.stats['from_context'] += 1
+                    self.last_speaker = line.speaker
+                    return
+
             if line.is_segment and line.base_line_id is not None and line.base_line_id in self.segment_speakers:
                 line.speaker = self.segment_speakers[line.base_line_id]
                 self.stats['from_context'] += 1
@@ -188,9 +239,13 @@ class SpeakerResolver:
                 if self.config.debug_detailed:
                     print(f"🔄 {fallback_speaker.upper()} (fallback: {fallback_reason})")
 
-            # Сохраняем для сегментов
+            # Сохраняем для сегментов и контекста 2.3
             if line.is_segment and line.base_line_id is not None:
                 self.segment_speakers[line.base_line_id] = line.speaker
+
+            if self.context_manager:
+                self.context_manager.set_segment_speaker(line, line.speaker)
+                self.context_manager.update_dialogue_sequence(line.speaker)
 
         except Exception as e:
             print(f"⚠️ Ошибка строки {line_index}: {e}")
@@ -253,6 +308,15 @@ class SpeakerResolver:
             scores['male'] += dialogue_score['male'] * self.WEIGHTS['dialogue_context']
             scores['female'] += dialogue_score['female'] * self.WEIGHTS['dialogue_context']
             reasoning.extend(dialogue_score['reasons'])
+
+            # 🔥 8. Stage 2.1->2.2: collect/resolve evidences
+            ext_speaker, ext_conf, ext_reasons = self._resolve_with_external_modules(line)
+            if ext_speaker != "unknown":
+                if ext_speaker == 'male':
+                    scores['male'] += max(ext_conf, 0.1)
+                elif ext_speaker == 'female':
+                    scores['female'] += max(ext_conf, 0.1)
+                reasoning.extend(ext_reasons)
 
             # 🔥 ОПРЕДЕЛЯЕМ ПОБЕДИТЕЛЯ
             return self._determine_winner_simple(scores, reasoning)
@@ -438,7 +502,19 @@ class SpeakerResolver:
             return "unknown", 0.0, [f"Ошибка: {e}"]
 
     def _smart_fallback(self, line: Line, previous_reasons: List[str]) -> Tuple[str, str]:
-        """УМНЫЙ ФОЛБЭК"""
+        """УМНЫЙ ФОЛБЭК + Stage 2.4 strategy."""
+        if self.fallback_strategy and self.context_manager:
+            try:
+                doc_stats = {
+                    'male_ratio': self.book_gender_stats['male'] / max(self.book_gender_stats['total'], 1),
+                    'female_ratio': self.book_gender_stats['female'] / max(self.book_gender_stats['total'], 1),
+                }
+                fallback = self.fallback_strategy.get_fallback_speaker(line, self.context_manager, doc_stats)
+                if fallback:
+                    return fallback, "fallback_strategy(2.4)"
+            except Exception:
+                pass
+
         text_lower = line.original.lower()
 
         male_verbs = len(re.findall(r'\b\S+л\b', text_lower))
@@ -447,12 +523,33 @@ class SpeakerResolver:
         if male_verbs > female_verbs:
             return "male", f"глаголы м.р. ({male_verbs} vs {female_verbs})"
         elif female_verbs > male_verbs:
-            return "female", f"глаголы ж.р. ({female_verbs} vs {male_verbs})"
+            return "female", f"глаголы ж.р. ({male_verbs} vs {female_verbs})"
 
         if self.last_speaker and self.last_speaker != "narrator":
             return "female" if self.last_speaker == "male" else "male", "чередование"
 
         return "male", "умолчание"
+
+    def _resolve_with_external_modules(self, line: Line) -> Tuple[str, float, List[str]]:
+        """Stage 2.1 -> 2.2 pipeline (collect evidences + resolve)."""
+        if not self.evidence_collectors or not self.evidence_resolver:
+            return "unknown", 0.0, []
+
+        all_evidences = []
+        for collector in self.evidence_collectors:
+            try:
+                all_evidences.extend(collector.collect(line))
+            except Exception:
+                continue
+
+        if not all_evidences:
+            return "unknown", 0.0, []
+
+        result = self.evidence_resolver.resolve(all_evidences)
+        reasons = [
+            f"2.1/2.2: {ev.source}:{ev.details} w={ev.weight:.2f}" for ev in result.used_evidences[:4]
+        ]
+        return result.speaker, result.confidence, reasons
 
     def _log_statistics(self, ubf: UserBookFormat):
         """Логирование статистики"""

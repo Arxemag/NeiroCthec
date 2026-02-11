@@ -9,10 +9,10 @@ class LocalObjectStorage:
         self.root.mkdir(parents=True, exist_ok=True)
         self.uri_prefix = uri_prefix.rstrip("/")
 
-    def path_for_line(self, user_id: str, book_id: str, line_id: int) -> Path:
+    def path_for_line(self, user_id: str, book_id: str, line_id: str) -> Path:
         target = self.root / user_id / book_id
         target.mkdir(parents=True, exist_ok=True)
         return target / f"line_{line_id}.wav"
 
-    def uri_for_line(self, user_id: str, book_id: str, line_id: int) -> str:
+    def uri_for_line(self, user_id: str, book_id: str, line_id: str) -> str:
         return f"{self.uri_prefix}/{user_id}/{book_id}/line_{line_id}.wav"

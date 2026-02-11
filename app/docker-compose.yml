@@ -1,26 +1,28 @@
 version: '3.8'
 
 services:
-  main-service:
+  api:
     build:
       context: .
-      dockerfile: Dockerfile
-    command: python main.py
+      dockerfile: Dockerfile.api
+    command: python3 -m uvicorn api.app:app --host 0.0.0.0 --port 8000
     environment:
+      - DATABASE_URL=postgresql+psycopg2://neiro:neiro@postgres:5432/neirocthec
       - STAGE4_TTS_URL=http://stage4-tts:8010
     volumes:
       - ./storage:/app/storage
     depends_on:
-      - stage4-tts
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
 
   stage4-tts:
     build:
       context: .
       dockerfile: stage4_service/Dockerfile
-    runtime: nvidia
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CORE_INTERNAL_URL=http://api:8000/internal
       - STAGE4_MAX_GPU_JOBS=1
       - STAGE4_WORKERS=1
       - STAGE4_OBJECT_ROOT=/srv/storage/object
@@ -29,12 +31,22 @@ services:
       - ./storage:/srv/storage
     ports:
       - "8010:8010"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
-volumes: {}
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=neiro
+      - POSTGRES_PASSWORD=neiro
+      - POSTGRES_DB=neirocthec
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neiro -d neirocthec"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
