@@ -66,3 +66,5 @@ docker compose down -v
 Если нужно изменить секреты/лимиты — отредактируйте переменные в сервисах `api`, `worker`, `api-migrate`.
 
 > Важно: корневой `docker-compose.yml` теперь также поднимает Python backend (`backend` на 8000 и `stage4-tts` на 8010), а этот README описывает именно frontend-stack.
+
+> Для запуска вместе с Python backend из корня используйте профиль: `docker compose --profile python-backend up --build -d`.

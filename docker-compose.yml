@@ -141,6 +141,7 @@ services:
 
   # Core python backend stack (FastAPI + Stage4 TTS)
   py-postgres:
+    profiles: ["python-backend"]
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: neiro
@@ -157,6 +158,7 @@ services:
       - "5433:5432"
 
   backend:
+    profiles: ["python-backend"]
     build:
       context: ./app
       dockerfile: Dockerfile.api
@@ -176,6 +178,7 @@ services:
       - "8000:8000"
 
   stage4-tts:
+    profiles: ["python-backend"]
     build:
       context: ./app
       dockerfile: stage4_service/Dockerfile
