@@ -22,7 +22,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt \
+    && python3 -m pip install --no-cache-dir fastapi~=0.128.0 uvicorn[standard]~=0.40.0
 
 COPY . /app
 
