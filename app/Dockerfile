@@ -1,48 +1,18 @@
-# Dockerfile.gpu
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM python:3.10-slim
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-ARG DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Устанавливаем Python и системные зависимости (с ретраями для нестабильных apt-индексов)
-RUN set -eux; \
-    for i in {1..5}; do \
-        apt-get update -o Acquire::Retries=3 && break; \
-        echo "apt-get update failed (attempt $i), retrying..."; \
-        sleep 5; \
-    done; \
-    apt-get install -y --no-install-recommends \
-        python3.10 \
-        python3-pip \
-        python3.10-venv \
-        ffmpeg \
-        libsndfile1 \
-        git \
-        wget; \
-    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
-# Создаём виртуальное окружение
-RUN python3.10 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Устанавливаем PyTorch с CUDA поддержкой
-RUN pip install --no-cache-dir \
-    torch==2.2.2 \
-    torchaudio==2.2.2 \
-    --index-url https://download.pytorch.org/whl/cu121
-
-# Устанавливаем остальные зависимости
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Устанавливаем TTS
-RUN pip install --no-cache-dir TTS==0.22.0
-
-# Копируем код
 COPY . /app
-WORKDIR /app
 
-# Проверяем CUDA
-RUN python -c "import torch; print('='*60); print('PyTorch версия:', torch.__version__); print('CUDA доступна:', torch.cuda.is_available()); print('CUDA версия:', torch.version.cuda); print('='*60)"
-
-CMD ["python", "test_gpu_tts.py"]
+CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
