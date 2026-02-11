@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from api.schemas.book import RetryBookPayload, RetryLinePayload, TTSCompletePayload, TTSLeaseResponse
-from core.services.pipeline_service import run_contract_pipeline, try_stage5_assemble
+from core.services.pipeline_service import run_contract_pipeline, stage4_mark_done, try_stage5_assemble, update_book_status
 from db.models import Book, Line, LineStatus, TTSTask, TaskStatus
 from db.session import get_db
 
@@ -43,16 +43,13 @@ def tts_complete(payload: TTSCompletePayload, db: Session = Depends(get_db)):
     if not line:
         raise HTTPException(status_code=404, detail="Line not found")
 
-    line.audio_path = payload.audio_path
-    line.tts_status = LineStatus.tts_done
-
-    if line.tts_task:
-        line.tts_task.status = TaskStatus.done
+    stage4_mark_done(db, line, payload.audio_path)
 
     book = db.scalar(select(Book).where(Book.id == line.book_id))
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
+    update_book_status(db, book)
     try_stage5_assemble(db, book, OUTPUT_ROOT)
     db.commit()
     return {"status": "ok", "line_id": line.id}
