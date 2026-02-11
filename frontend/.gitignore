@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build / cache
+.next/
+dist/
+out/
+*.tsbuildinfo
+
+# Env (keep .env.example)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Prisma
+apps/api/prisma/migrations/**/migration_lock.toml
