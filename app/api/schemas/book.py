@@ -46,4 +46,15 @@ class TTSLeaseResponse(BaseModel):
     text: str
     voice: str
     emotion: dict
+    audio_config: dict | None = None
 
+
+
+class AudioConfigResponse(BaseModel):
+    user_id: str
+    is_custom: bool
+    config: dict
+
+
+class AudioConfigUpdatePayload(BaseModel):
+    config: dict

@@ -53,6 +53,7 @@ def process_next_task():
         text=task["text"],
         speaker=task["voice"],
         emotion=task["emotion"],
+        audio_config=task.get("audio_config"),
     )
 
     result = tts(req)

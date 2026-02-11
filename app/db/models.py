@@ -86,5 +86,15 @@ class TTSTask(Base):
     line: Mapped[Line] = relationship(back_populates="tts_task")
 
 
+class UserAudioConfig(Base):
+    __tablename__ = "user_audio_configs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    config: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 Index("ix_lines_book_stage", Line.book_id, Line.tts_status)
 Index("ix_lines_book_idx", Line.book_id, Line.idx)

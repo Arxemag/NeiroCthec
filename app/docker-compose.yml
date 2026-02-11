@@ -5,11 +5,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    command: python3 -m uvicorn api.app:app --host 0.0.0.0 --port 8000
+    command: python3 -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
     environment:
       - DATABASE_URL=postgresql+psycopg2://neiro:neiro@postgres:5432/neirocthec
       - STAGE4_TTS_URL=http://stage4-tts:8010
     volumes:
+      - ./:/app
       - ./storage:/app/storage
     depends_on:
       postgres:
@@ -27,7 +28,9 @@ services:
       - STAGE4_WORKERS=1
       - STAGE4_OBJECT_ROOT=/srv/storage/object
       - STAGE4_OBJECT_URI_PREFIX=s3://audio
+    command: python3 -m uvicorn stage4_service.app:app --host 0.0.0.0 --port 8010 --reload
     volumes:
+      - ./:/srv
       - ./storage:/srv/storage
     ports:
       - "8010:8010"

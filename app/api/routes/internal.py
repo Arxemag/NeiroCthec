@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from api.schemas.book import RetryBookPayload, RetryLinePayload, TTSCompletePayload, TTSLeaseResponse
 from core.services.pipeline_service import run_contract_pipeline, stage4_mark_done, try_stage5_assemble, update_book_status
-from db.models import Book, Line, LineStatus, TTSTask, TaskStatus
+from db.models import Book, Line, LineStatus, TTSTask, TaskStatus, UserAudioConfig
 from db.session import get_db
 
 router = APIRouter()
@@ -26,6 +26,7 @@ def tts_next(db: Session = Depends(get_db)):
     db.refresh(task)
 
     payload = task.payload
+    user_audio = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == payload["user_id"]))
     return TTSLeaseResponse(
         task_id=task.id,
         line_id=payload["line_id"],
@@ -34,6 +35,7 @@ def tts_next(db: Session = Depends(get_db)):
         text=payload["text"],
         voice=payload.get("voice", "narrator"),
         emotion=payload.get("emotion") or {},
+        audio_config=user_audio.config if user_audio else None,
     )
 
 
