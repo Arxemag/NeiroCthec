@@ -16,7 +16,14 @@
 
 ### Быстрый старт
 
-Из папки `frontend`:
+### Вариант запуска из корня репозитория
+
+```bash
+# из /workspace/NeiroCthec
+docker compose up --build -d
+```
+
+Из папки `frontend` (эквивалентный запуск):
 
 ```bash
 docker compose up --build -d
