@@ -82,7 +82,7 @@ def debug_ui() -> str:
 
   <div class="card">
     <h3>4) Быстрая настройка TTS (audio.yaml)</h3>
-    <div class="muted">Читает/сохраняет через `/books/settings/audio` для текущего `X-User-Id`.</div>
+    <div class="muted">Читает/сохраняет через `/books/settings/audio` для текущего `X-User-Id` (user config хранится в БД `user_audio_configs`, global — в `audio.yaml`).</div>
     <div class="grid2">
       <div class="range-wrap"><label for="xtts_temperature">xtts.temperature</label><input type="range" id="xtts_temperature" min="0.1" max="2.0" step="0.05" oninput="syncRangeValue('xtts_temperature')" /><span id="xtts_temperature_val"></span></div>
       <div class="range-wrap"><label for="xtts_top_k">xtts.top_k</label><input type="range" id="xtts_top_k" min="1" max="200" step="1" oninput="syncRangeValue('xtts_top_k')" /><span id="xtts_top_k_val"></span></div>

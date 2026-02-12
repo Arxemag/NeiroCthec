@@ -52,6 +52,8 @@ class TTSLeaseResponse(BaseModel):
 class AudioConfigResponse(BaseModel):
     user_id: str
     is_custom: bool
+    source: str
+    source_path: str | None = None
     config: dict
 
 

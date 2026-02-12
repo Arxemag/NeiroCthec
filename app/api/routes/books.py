@@ -31,14 +31,14 @@ AUDIO_CONFIG_PATHS = (Path("audio.yaml"), Path("app/audio.yaml"))
 SUPPORTED_UPLOAD_EXTENSIONS = {".txt", ".fb2"}
 
 
-def _load_global_audio_config() -> dict:
+def _load_global_audio_config() -> tuple[dict, str]:
     for path in AUDIO_CONFIG_PATHS:
         if path.exists():
             with path.open("r", encoding="utf-8") as fh:
                 loaded = yaml.safe_load(fh) or {}
                 if not isinstance(loaded, dict):
                     raise HTTPException(status_code=500, detail="audio.yaml must contain a top-level object")
-                return loaded
+                return loaded, str(path)
     raise HTTPException(status_code=500, detail="audio.yaml was not found")
 
 
@@ -98,11 +98,11 @@ def list_books(user_id: str = Depends(get_current_user_id), db: Session = Depend
 
 @router.get("/settings/audio", response_model=AudioConfigResponse)
 def get_audio_config(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    global_config = _load_global_audio_config()
+    global_config, global_path = _load_global_audio_config()
     custom = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == user_id))
     if custom:
-        return AudioConfigResponse(user_id=user_id, is_custom=True, config=custom.config)
-    return AudioConfigResponse(user_id=user_id, is_custom=False, config=global_config)
+        return AudioConfigResponse(user_id=user_id, is_custom=True, source="user_db", source_path="table:user_audio_configs", config=custom.config)
+    return AudioConfigResponse(user_id=user_id, is_custom=False, source="global_file", source_path=global_path, config=global_config)
 
 
 @router.put("/settings/audio", response_model=AudioConfigResponse)
@@ -123,7 +123,7 @@ def upsert_audio_config(
 
     db.commit()
     db.refresh(row)
-    return AudioConfigResponse(user_id=user_id, is_custom=True, config=row.config)
+    return AudioConfigResponse(user_id=user_id, is_custom=True, source="user_db", source_path="table:user_audio_configs", config=row.config)
 
 
 @router.delete("/settings/audio", response_model=AudioConfigResponse)
@@ -133,7 +133,8 @@ def reset_audio_config(user_id: str = Depends(get_current_user_id), db: Session 
         db.delete(row)
         db.commit()
 
-    return AudioConfigResponse(user_id=user_id, is_custom=False, config=_load_global_audio_config())
+    global_config, global_path = _load_global_audio_config()
+    return AudioConfigResponse(user_id=user_id, is_custom=False, source="global_file", source_path=global_path, config=global_config)
 
 
 @router.get("/{book_id}", response_model=BookOut)
