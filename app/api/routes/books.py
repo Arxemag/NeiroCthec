@@ -19,7 +19,7 @@ from api.schemas.book import (
     BookUploadResponse,
 )
 from core.services.pipeline_service import run_contract_pipeline, update_book_status
-from db.models import Book, Line, LineStatus, UserAudioConfig
+from db.models import Book, BookStatus, Line, LineStatus, UserAudioConfig
 from db.session import get_db
 
 router = APIRouter()
@@ -28,6 +28,7 @@ STORAGE_ROOT = Path("storage")
 UPLOAD_ROOT = STORAGE_ROOT / "uploads"
 OUTPUT_ROOT = STORAGE_ROOT / "audio"
 AUDIO_CONFIG_PATHS = (Path("audio.yaml"), Path("app/audio.yaml"))
+SUPPORTED_UPLOAD_EXTENSIONS = {".txt", ".fb2"}
 
 
 def _load_global_audio_config() -> dict:
@@ -49,6 +50,9 @@ def upload_book(
 ):
     book_id = str(uuid.uuid4())
     safe_name = file.filename or "book.txt"
+    file_ext = Path(safe_name).suffix.lower()
+    if file_ext not in SUPPORTED_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Supported formats: .txt, .fb2")
 
     user_upload_root = UPLOAD_ROOT / user_id
     user_upload_root.mkdir(parents=True, exist_ok=True)
@@ -61,8 +65,14 @@ def upload_book(
     db.add(book)
     db.flush()
 
-    run_contract_pipeline(db, book, OUTPUT_ROOT)
-    db.commit()
+    try:
+        run_contract_pipeline(db, book, OUTPUT_ROOT)
+        db.commit()
+    except ValueError as exc:
+        book.status = BookStatus.error
+        db.commit()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     db.refresh(book)
     return BookUploadResponse(id=book.id, status=book.status.value)
 

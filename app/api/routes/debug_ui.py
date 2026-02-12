@@ -43,8 +43,9 @@ def debug_ui() -> str:
   <div class=\"card\">
     <h3>1) Upload книги</h3>
     <div class=\"row\">
-      <input id=\"bookFile\" type=\"file\" />
+      <input id=\"bookFile\" type=\"file\" accept=\".txt,.fb2,text/plain,application/xml\" />
       <button onclick=\"uploadBook()\">POST /books/upload</button>
+      <button onclick=\"uploadAndRunFullPipeline()\">Upload + Stage4/5</button>
     </div>
   </div>
 
@@ -63,6 +64,7 @@ def debug_ui() -> str:
     <h3>3) Внутренние endpoints Stage4</h3>
     <div class=\"row\">
       <button onclick=\"leaseTask()\">POST /internal/tts-next</button>
+      <button onclick=\"runStage4ForBook()\">POST /internal/process-book-stage4</button>
       <input id=\"lineId\" placeholder=\"line_id\" />
       <input id=\"audioPath\" placeholder=\"audio_path (например s3://audio/...)\" />
       <button onclick=\"completeTask()\">POST /internal/tts-complete</button>
@@ -146,6 +148,27 @@ async function downloadBook(){
   log('GET /books/{id}/download', `Скачано: ${blob.size} bytes`, true);
 }
 
+
+async function runStage4ForBook(){
+  const id = $("bookId").value.trim();
+  if (!id) return log('stage4: ошибка', 'Нужен book_id', false);
+  const res = await fetch('/internal/process-book-stage4', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ book_id: id, max_tasks: 1000 })
+  });
+  const body = await parseResponse(res);
+  log('POST /internal/process-book-stage4', body, res.ok);
+  return res.ok ? body : null;
+}
+
+async function uploadAndRunFullPipeline(){
+  await uploadBook();
+  const id = $("bookId").value.trim();
+  if (!id) return;
+  const result = await runStage4ForBook();
+  if (result) await getStatus();
+}
 async function leaseTask(){
   const res = await fetch('/internal/tts-next', { method: 'POST' });
   const body = await parseResponse(res);

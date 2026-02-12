@@ -58,3 +58,16 @@ class AudioConfigResponse(BaseModel):
 
 class AudioConfigUpdatePayload(BaseModel):
     config: dict
+
+
+class ProcessBookStage4Payload(BaseModel):
+    book_id: str
+    max_tasks: int = 500
+
+
+class ProcessBookStage4Response(BaseModel):
+    book_id: str
+    processed_tasks: int
+    remaining_tasks: int
+    book_status: str
+    final_audio_path: str | None = None
