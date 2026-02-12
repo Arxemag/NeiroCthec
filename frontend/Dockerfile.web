@@ -5,7 +5,9 @@ COPY package*.json ./
 COPY apps/api/package*.json ./apps/api/
 COPY apps/web/package*.json ./apps/web/
 
-RUN npm ci --include=dev
+ENV NPM_CONFIG_INCLUDE=dev
+RUN npm ci --include=dev --workspaces --include-workspace-root
+RUN npm ci -w apps/web --include=dev
 
 COPY . .
 
