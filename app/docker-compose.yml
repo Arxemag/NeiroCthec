@@ -44,6 +44,13 @@ services:
     build:
       context: .
       dockerfile: tts_engine_service/Dockerfile
+    environment:
+      - TTS_BACKEND=coqui
+      - TTS_LANGUAGE=ru
+      - TTS_VOICES_ROOT=/srv/storage/voices
+    volumes:
+      - ./:/srv
+      - ./storage:/srv/storage
     ports:
       - "8020:8020"
 

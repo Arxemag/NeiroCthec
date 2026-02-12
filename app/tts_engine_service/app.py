@@ -8,7 +8,7 @@ import wave
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Standalone TTS Engine")
@@ -26,16 +26,19 @@ class SynthesizeRequest(BaseModel):
     emotion: EmotionPayload = Field(default_factory=EmotionPayload)
 
 
-# Optional real TTS backend (Coqui). Falls back to mock tone if unavailable.
+_BACKEND = os.getenv("TTS_BACKEND", "coqui").strip().lower()  # coqui | mock | auto
 _COQUI = None
-try:
-    from TTS.api import TTS  # type: ignore
+_COQUI_ERROR: str | None = None
 
-    model_name = os.getenv("TTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
-    use_gpu = os.getenv("TTS_USE_GPU", "false").lower() == "true"
-    _COQUI = TTS(model_name=model_name, progress_bar=False, gpu=use_gpu)
-except Exception:
-    _COQUI = None
+if _BACKEND in {"coqui", "auto"}:
+    try:
+        from TTS.api import TTS  # type: ignore
+
+        model_name = os.getenv("TTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
+        use_gpu = os.getenv("TTS_USE_GPU", "false").lower() == "true"
+        _COQUI = TTS(model_name=model_name, progress_bar=False, gpu=use_gpu)
+    except Exception as exc:  # backend init diagnostics
+        _COQUI_ERROR = str(exc)
 
 
 def _speaker_sample_for(speaker: str) -> str | None:
@@ -49,38 +52,7 @@ def _speaker_sample_for(speaker: str) -> str | None:
     return str(sample) if sample.exists() else None
 
 
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok", "backend": "coqui" if _COQUI else "mock"}
-
-
-@app.post("/synthesize")
-def synthesize(request: SynthesizeRequest) -> Response:
-    # Real voice backend
-    if _COQUI is not None:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        try:
-            speaker_wav = _speaker_sample_for(request.speaker)
-            if speaker_wav:
-                _COQUI.tts_to_file(
-                    text=request.text,
-                    speaker_wav=speaker_wav,
-                    language=os.getenv("TTS_LANGUAGE", "ru"),
-                    file_path=str(tmp_path),
-                    split_sentences=False,
-                )
-            else:
-                _COQUI.tts_to_file(text=request.text, file_path=str(tmp_path), split_sentences=False)
-            content = tmp_path.read_bytes()
-            with wave.open(BytesIO(content), "rb") as wf:
-                duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
-            return Response(content=content, media_type="audio/wav", headers={"x-duration-ms": str(duration_ms)})
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
-
-    # Mock fallback backend (tone)
+def _mock_synthesize(request: SynthesizeRequest) -> Response:
     sample_rate = 22050
     text_len = max(len(request.text.strip()), 1)
     duration_sec = min(max(text_len * 0.06, 0.25), 8.0)
@@ -117,5 +89,59 @@ def synthesize(request: SynthesizeRequest) -> Response:
     return Response(
         content=wav_buffer.getvalue(),
         media_type="audio/wav",
-        headers={"x-duration-ms": str(duration_ms)},
+        headers={"x-duration-ms": str(duration_ms), "x-tts-backend": "mock"},
     )
+
+
+@app.get("/health")
+def health() -> dict:
+    active = "coqui" if _COQUI is not None else "mock"
+    return {
+        "status": "ok",
+        "requested_backend": _BACKEND,
+        "active_backend": active,
+        "coqui_ready": _COQUI is not None,
+        "coqui_error": _COQUI_ERROR,
+    }
+
+
+@app.post("/synthesize")
+def synthesize(request: SynthesizeRequest) -> Response:
+    # Force mock mode explicitly
+    if _BACKEND == "mock":
+        return _mock_synthesize(request)
+
+    # Coqui required mode
+    if _BACKEND == "coqui" and _COQUI is None:
+        raise HTTPException(status_code=503, detail=f"Coqui backend is not available: {_COQUI_ERROR}")
+
+    # auto mode fallback to mock only when coqui unavailable
+    if _COQUI is None:
+        return _mock_synthesize(request)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        speaker_wav = _speaker_sample_for(request.speaker)
+        kwargs = {
+            "text": request.text,
+            "file_path": str(tmp_path),
+            "split_sentences": False,
+        }
+        if speaker_wav:
+            kwargs["speaker_wav"] = speaker_wav
+            kwargs["language"] = os.getenv("TTS_LANGUAGE", "ru")
+
+        _COQUI.tts_to_file(**kwargs)
+
+        content = tmp_path.read_bytes()
+        with wave.open(BytesIO(content), "rb") as wf:
+            duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+        return Response(
+            content=content,
+            media_type="audio/wav",
+            headers={"x-duration-ms": str(duration_ms), "x-tts-backend": "coqui"},
+        )
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()

@@ -22,3 +22,11 @@
 - Если Coqui недоступен, включается mock-tone fallback (для контрактной отладки).
 
 `GET /health` возвращает активный backend в поле `backend` (`coqui` или `mock`).
+
+
+## Переменные окружения
+- `TTS_BACKEND=coqui|mock|auto` (рекомендуется `coqui`, чтобы не получить тон-генератор).
+- `TTS_LANGUAGE=ru`
+- `TTS_VOICES_ROOT=/srv/storage/voices`
+
+`/health` показывает `requested_backend`, `active_backend` и `coqui_error` для диагностики.
