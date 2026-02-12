@@ -464,4 +464,4 @@ def debug_run(book_path: str):
 
 
 if __name__ == "__main__":
-    debug_run("book.txt")
+    debug_run("../app/book.txt")

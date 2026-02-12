@@ -206,7 +206,7 @@ def run_pipeline():
             return
 
     # Файл книги
-    book = Path("storage/books/book.txt")
+    book = Path("../app/storage/books/book.txt")
     if not book.exists():
         print(f"❌ Файл книги не найден: {book}")
         return
@@ -279,7 +279,7 @@ def run_pipeline():
     print("=" * 40)
 
     # Создаём директории
-    audio_dir = Path("storage/audio")
+    audio_dir = Path("../app/storage/audio")
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     # Очищаем старые файлы, но сохраняем директории
@@ -425,7 +425,7 @@ def run_pipeline():
     print("STAGE 5: СБОРКА АУДИО")
     print("=" * 40)
 
-    final_path = Path("storage/audio/final.wav")
+    final_path = Path("../app/storage/audio/final.wav")
     final_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Очищаем старый файл
