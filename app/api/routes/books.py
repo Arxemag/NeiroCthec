@@ -68,10 +68,14 @@ def upload_book(
     try:
         run_contract_pipeline(db, book, OUTPUT_ROOT)
         db.commit()
-    except ValueError as exc:
+    except (ValueError, UnicodeDecodeError) as exc:
         book.status = BookStatus.error
         db.commit()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=f"Failed to parse uploaded file: {exc}") from exc
+    except Exception as exc:
+        book.status = BookStatus.error
+        db.commit()
+        raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}") from exc
 
     db.refresh(book)
     return BookUploadResponse(id=book.id, status=book.status.value)
