@@ -44,3 +44,6 @@
 Для production качества лучше закрепить `TTS_BACKEND=coqui` и проверить, что Coqui и voice samples корректно доступны.
 
 - Для XTTS учитывается `audio_config.xtts.speed_base` (умножается на `emotion.tempo`, итог clamp 0.5..2.0).
+
+- В ответе `/synthesize` для Coqui добавляются debug-заголовки: `x-tts-language`, `x-tts-speaker`, `x-tts-speaker-wav`.
+- Для XTTS также применяются параметры из `audio_config.xtts`: `temperature`, `top_k`, `top_p`, `repetition_penalty`.

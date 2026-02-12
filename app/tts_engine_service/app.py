@@ -106,6 +106,32 @@ def _resolve_xtts_speed(request: SynthesizeRequest) -> float:
     final_speed = speed_base * float(tempo)
     return max(0.5, min(final_speed, 2.0))
 
+
+
+def _resolve_xtts_params(request: SynthesizeRequest) -> dict:
+    cfg = request.audio_config or {}
+    xtts = cfg.get("xtts") if isinstance(cfg, dict) else None
+    if not isinstance(xtts, dict):
+        return {}
+
+    out: dict = {}
+
+    def _num(name: str, min_v: float | None = None, max_v: float | None = None):
+        raw = xtts.get(name)
+        if isinstance(raw, (int, float)):
+            value = float(raw)
+            if min_v is not None:
+                value = max(min_v, value)
+            if max_v is not None:
+                value = min(max_v, value)
+            out[name] = value
+
+    _num("temperature", 0.05, 2.0)
+    _num("top_k", 1, 400)
+    _num("top_p", 0.1, 1.0)
+    _num("repetition_penalty", 1.0, 10.0)
+    return out
+
 def _resolve_coqui_speaker_wav(request: SynthesizeRequest) -> str | None:
     if request.voice_sample and request.voice_sample.strip():
         sample = Path(request.voice_sample.strip())
@@ -215,6 +241,9 @@ def health() -> dict:
         "active_backend": active,
         "coqui_ready": _COQUI is not None,
         "coqui_error": _COQUI_ERROR,
+        "coqui_model_name": _COQUI_MODEL_NAME,
+        "default_language": os.getenv("TTS_LANGUAGE", "ru"),
+        "voices_root": os.getenv("TTS_VOICES_ROOT", "storage/voices"),
         "espeak_ready": _ESPEAK_BIN is not None,
     }
 
@@ -259,6 +288,7 @@ def synthesize(request: SynthesizeRequest) -> Response:
         }
         if "xtts" in (_COQUI_MODEL_NAME or "").lower():
             kwargs["speed"] = _resolve_xtts_speed(request)
+            kwargs.update(_resolve_xtts_params(request))
         if speaker_wav:
             kwargs["speaker_wav"] = speaker_wav
         elif _coqui_requires_speaker_wav():
@@ -275,10 +305,18 @@ def synthesize(request: SynthesizeRequest) -> Response:
         content = tmp_path.read_bytes()
         with wave.open(BytesIO(content), "rb") as wf:
             duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+        speaker_label = _normalize_speaker_label(request.speaker)
+        speaker_marker = Path(speaker_wav).name if speaker_wav else "none"
         return Response(
             content=content,
             media_type="audio/wav",
-            headers={"x-duration-ms": str(duration_ms), "x-tts-backend": "coqui"},
+            headers={
+                "x-duration-ms": str(duration_ms),
+                "x-tts-backend": "coqui",
+                "x-tts-language": language,
+                "x-tts-speaker": speaker_label,
+                "x-tts-speaker-wav": speaker_marker,
+            },
         )
     finally:
         if tmp_path.exists():
