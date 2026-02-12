@@ -77,7 +77,12 @@ docker compose -f app/docker-compose.yml up --build stage4-tts tts-engine
 
 Проблема возникает, когда `tts-engine` уходит в деградированный backend (`espeak`/`mock`) и это не видно сразу.
 Для защиты добавлены переменные в `stage4-tts`:
-- `STAGE4_ENFORCE_TTS_BACKEND=true`
+- `STAGE4_ENFORCE_TTS_BACKEND=false` (рекомендуется для dev, чтобы не блокировать пайплайн при деградации backend)
 - `STAGE4_EXPECT_TTS_BACKEND=coqui`
 
 `stage4-tts` проверяет HTTP-заголовок `x-tts-backend` от `tts-engine` и вернёт ошибку, если backend не совпадает с ожидаемым.
+
+
+### Если видите 502 на `/internal/process-book-stage4`
+Частая причина: `tts-engine` не может поднять Coqui и в строгом режиме stage4 блокирует задачу.
+Проверьте `GET /health` у `tts-engine` и включите мягкий режим (`STAGE4_ENFORCE_TTS_BACKEND=false`) для непрерывной обработки.

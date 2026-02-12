@@ -31,7 +31,7 @@
 - Если образец не найден (`voice_sample` в запросе и/или файлы в `TTS_VOICES_ROOT`), сервис вернёт `422`, а не будет синтезировать "чужим" голосом.
 
 ## Переменные окружения
-- `TTS_BACKEND=coqui|espeak|mock|auto` (рекомендуется `coqui`)
+- `TTS_BACKEND=coqui|espeak|mock|auto` (для dev/стабильности пайплайна рекомендуется `auto`)
 - `TTS_LANGUAGE=ru`
 - `TTS_VOICES_ROOT=/srv/storage/voices`
 - `TTS_ALLOW_DEGRADED_BACKEND=false|true`
@@ -39,3 +39,6 @@
   - `true`: разрешает fallback в `espeak`/`mock`
 
 `/health` используйте для быстрой проверки, что реально активен именно `coqui`.
+
+
+Для production качества лучше закрепить `TTS_BACKEND=coqui` и проверить, что Coqui и voice samples корректно доступны.
