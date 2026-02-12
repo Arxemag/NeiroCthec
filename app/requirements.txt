@@ -4,7 +4,9 @@ scipy
 soundfile
 
 # PyTorch
-torch==2.2.2
+torch @ https://files.pythonhosted.org/packages/33/b3/1fcc3bccfddadfd6845dcbfe26eb4b099f1dfea5aa0e5cfb92b3c98dba5b/torch-2.2.2-cp310-cp310-manylinux1_x86_64.whl \
+    --hash=sha256:bc889d311a855dd2dfd164daf8cc903a6b7273a747189cebafdd89106e4ad585 \
+    --hash=sha256:d2d234ec9e3067dc6987bc2a46c6db6043742cf2549c55ce68565eadbd24c6b7
 torchaudio==2.2.2
 
 # TTS
