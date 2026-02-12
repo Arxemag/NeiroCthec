@@ -48,6 +48,23 @@ if _BACKEND in {"coqui", "auto"}:
 _ESPEAK_BIN = shutil.which("espeak") or shutil.which("espeak-ng")
 
 
+
+
+def _normalize_speaker_label(speaker: str | None) -> str:
+    raw = (speaker or "").strip().lower()
+    aliases = {
+        "famaly": "female",
+        "femaly": "female",
+        "woman": "female",
+        "girl": "female",
+        "man": "male",
+        "boy": "male",
+    }
+    normalized = aliases.get(raw, raw)
+    if normalized in {"male", "female", "narrator"}:
+        return normalized
+    return "narrator"
+
 def _speaker_sample_for(speaker: str) -> str | None:
     voices_root = Path(os.getenv("TTS_VOICES_ROOT", "storage/voices"))
     mapping = {
@@ -55,7 +72,7 @@ def _speaker_sample_for(speaker: str) -> str | None:
         "male": voices_root / "male.wav",
         "female": voices_root / "female.wav",
     }
-    sample = mapping.get((speaker or "").lower(), mapping["narrator"])
+    sample = mapping.get(_normalize_speaker_label(speaker), mapping["narrator"])
     return str(sample) if sample.exists() else None
 
 
@@ -81,7 +98,7 @@ def _resolve_coqui_speaker_wav(request: SynthesizeRequest) -> str | None:
         if sample.exists():
             return str(sample)
 
-    return _speaker_sample_for(request.speaker)
+    return _speaker_sample_for(_normalize_speaker_label(request.speaker))
 
 
 def _coqui_requires_speaker_wav() -> bool:
@@ -100,7 +117,7 @@ def _mock_synthesize(request: SynthesizeRequest) -> Response:
 
     energy = max(0.1, min(request.emotion.energy, 2.0))
     pitch_factor = request.emotion.pitch
-    speaker = request.speaker.lower()
+    speaker = _normalize_speaker_label(request.speaker)
     base_freq = 180 if speaker == "male" else 230 if speaker == "female" else 200
     freq = base_freq * (2 ** pitch_factor)
 

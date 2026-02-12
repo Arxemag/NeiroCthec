@@ -27,7 +27,7 @@ class MockSynthesizer(BaseSynthesizer):
 
         energy = max(0.1, min(request.emotion.energy, 2.0))
         pitch_factor = request.emotion.pitch
-        speaker = request.speaker.lower()
+        speaker = _normalize_speaker_label(request.speaker)
         base_freq = 180 if speaker == "male" else 230 if speaker == "female" else 200
         freq = base_freq * (2 ** pitch_factor)
 
@@ -57,6 +57,22 @@ class MockSynthesizer(BaseSynthesizer):
         return int(duration_sec * 1000)
 
 
+def _normalize_speaker_label(speaker: str | None) -> str:
+    raw = (speaker or "").strip().lower()
+    aliases = {
+        "famaly": "female",
+        "femaly": "female",
+        "woman": "female",
+        "girl": "female",
+        "man": "male",
+        "boy": "male",
+    }
+    normalized = aliases.get(raw, raw)
+    if normalized in {"male", "female", "narrator"}:
+        return normalized
+    return "narrator"
+
+
 class ExternalHTTPSynthesizer(BaseSynthesizer):
     @staticmethod
     def _resolve_language(request: TTSRequest) -> str | None:
@@ -75,7 +91,7 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
         cfg = request.audio_config or {}
         voices = cfg.get("voices") if isinstance(cfg, dict) else None
         if isinstance(voices, dict):
-            sample = voices.get((request.speaker or "").lower()) or voices.get("narrator")
+            sample = voices.get(_normalize_speaker_label(request.speaker)) or voices.get("narrator")
             if isinstance(sample, str) and sample.strip():
                 return sample.strip()
         return None
@@ -91,7 +107,7 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
             f"{self.base_url}/synthesize",
             json={
                 "text": request.text,
-                "speaker": request.speaker,
+                "speaker": _normalize_speaker_label(request.speaker),
                 "emotion": request.emotion.model_dump(),
                 "language": self._resolve_language(request),
                 "voice_sample": self._resolve_voice_sample(request),
