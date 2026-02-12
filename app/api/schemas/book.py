@@ -49,7 +49,6 @@ class TTSLeaseResponse(BaseModel):
     audio_config: dict | None = None
 
 
-
 class AudioConfigResponse(BaseModel):
     user_id: str
     is_custom: bool
@@ -71,3 +70,13 @@ class ProcessBookStage4Response(BaseModel):
     remaining_tasks: int
     book_status: str
     final_audio_path: str | None = None
+    stopped: bool = False
+
+
+class StopBookStage4Payload(BaseModel):
+    book_id: str
+
+
+class StopBookStage4Response(BaseModel):
+    book_id: str
+    stop_requested: bool

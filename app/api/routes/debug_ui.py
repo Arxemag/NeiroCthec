@@ -28,6 +28,8 @@ def debug_ui() -> str:
     textarea { width: 100%; min-height: 160px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .ok { color: #0a7a2b; }
     .bad { color: #b30000; }
+    .progress { width: 100%; height: 18px; background:#eee; border-radius: 999px; overflow:hidden; margin-top:8px; }
+    .bar { height:100%; width:0%; background:#3b82f6; transition: width .25s; }
   </style>
 </head>
 <body>
@@ -68,10 +70,14 @@ def debug_ui() -> str:
     <div class=\"row\">
       <button onclick=\"leaseTask()\">POST /internal/tts-next</button>
       <button onclick=\"runStage4ForBook()\">POST /internal/process-book-stage4</button>
+      <button onclick=\"stopStage4ForBook()\">STOP Stage4</button>
       <input id=\"lineId\" placeholder=\"line_id\" />
       <input id=\"audioPath\" placeholder=\"audio_path (например s3://audio/...)\" />
       <button onclick=\"completeTask()\">POST /internal/tts-complete</button>
     </div>
+    <div class="muted" id="stage4ProgressText">Stage4 progress: 0%</div>
+    <div class="progress"><div id="stage4ProgressBar" class="bar"></div></div>
+
   </div>
 
   <div class="card">
@@ -113,6 +119,7 @@ const headers = (extra = {}) => ({ 'X-User-Id': getUserId(), ...extra });
   $("userId").value = getUserId();
   setDefaultRanges();
   loadAudioSettings();
+  refreshStage4Progress();
 })();
 
 function saveUser(){
@@ -220,6 +227,45 @@ async function resetAudioSettings(){
   if (res.ok) applyAudioConfigToSliders(body.config || {});
 }
 
+
+let stage4PollTimer = null;
+let stage4StopRequested = false;
+
+function setStage4Progress(progress, done, total){
+  const pct = Math.max(0, Math.min(100, Number(progress || 0)));
+  if ($('stage4ProgressBar')) $('stage4ProgressBar').style.width = pct + '%';
+  if ($('stage4ProgressText')) $('stage4ProgressText').textContent = `Stage4 progress: ${pct}% (${done || 0}/${total || 0})`;
+}
+
+async function refreshStage4Progress(){
+  const id = $('bookId').value.trim();
+  if (!id) return;
+  const res = await fetch(`/books/${id}/status`, { headers: headers() });
+  const body = await parseResponse(res);
+  if (res.ok) setStage4Progress(body.progress, body.tts_done, body.total_lines);
+}
+
+function startStage4Polling(){
+  if (stage4PollTimer) clearInterval(stage4PollTimer);
+  stage4PollTimer = setInterval(refreshStage4Progress, 1500);
+}
+function stopStage4Polling(){
+  if (stage4PollTimer) clearInterval(stage4PollTimer);
+  stage4PollTimer = null;
+}
+
+async function stopStage4ForBook(){
+  const id = $('bookId').value.trim();
+  if (!id) return log('stop stage4: ошибка', 'Нужен book_id', false);
+  stage4StopRequested = true;
+  const res = await fetch('/internal/stop-book-stage4', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ book_id: id })
+  });
+  log('POST /internal/stop-book-stage4', await parseResponse(res), res.ok);
+}
+
 async function uploadBook(){
   const file = $("bookFile").files[0];
   if (!file) return log('upload: ошибка', 'Выбери файл', false);
@@ -269,14 +315,26 @@ async function downloadBook(){
 async function runStage4ForBook(){
   const id = $("bookId").value.trim();
   if (!id) return log('stage4: ошибка', 'Нужен book_id', false);
-  const res = await fetch('/internal/process-book-stage4', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ book_id: id, max_tasks: 1000 })
-  });
-  const body = await parseResponse(res);
-  log('POST /internal/process-book-stage4', body, res.ok);
-  return res.ok ? body : null;
+  stage4StopRequested = false;
+  startStage4Polling();
+
+  let last = null;
+  while (!stage4StopRequested) {
+    const res = await fetch('/internal/process-book-stage4', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ book_id: id, max_tasks: 5 })
+    });
+    const body = await parseResponse(res);
+    log('POST /internal/process-book-stage4', body, res.ok);
+    if (!res.ok) { stopStage4Polling(); return null; }
+    last = body;
+    await refreshStage4Progress();
+    if (body.stopped || body.remaining_tasks === 0 || body.book_status === 'completed') break;
+  }
+
+  stopStage4Polling();
+  return last;
 }
 
 async function uploadAndRunFullPipeline(){

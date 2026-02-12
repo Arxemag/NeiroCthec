@@ -13,6 +13,8 @@ from api.schemas.book import (
     ProcessBookStage4Response,
     RetryBookPayload,
     RetryLinePayload,
+    StopBookStage4Payload,
+    StopBookStage4Response,
     TTSCompletePayload,
     TTSLeaseResponse,
 )
@@ -23,6 +25,7 @@ from db.session import get_db
 router = APIRouter()
 OUTPUT_ROOT = Path("storage/audio")
 STAGE4_TTS_URL = os.getenv("STAGE4_TTS_URL", "http://stage4-tts:8010")
+STOP_STAGE4_BOOKS: set[str] = set()
 
 
 @router.post("/tts-next", response_model=TTSLeaseResponse)
@@ -67,6 +70,12 @@ def tts_complete(payload: TTSCompletePayload, db: Session = Depends(get_db)):
     return {"status": "ok", "line_id": line.id}
 
 
+@router.post("/stop-book-stage4", response_model=StopBookStage4Response)
+def stop_book_stage4(payload: StopBookStage4Payload):
+    STOP_STAGE4_BOOKS.add(payload.book_id)
+    return StopBookStage4Response(book_id=payload.book_id, stop_requested=True)
+
+
 @router.post("/process-book-stage4", response_model=ProcessBookStage4Response)
 def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends(get_db)):
     book = db.scalar(select(Book).where(Book.id == payload.book_id))
@@ -74,7 +83,13 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
         raise HTTPException(status_code=404, detail="Book not found")
 
     processed = 0
+    stopped = False
     for _ in range(max(payload.max_tasks, 1)):
+        if book.id in STOP_STAGE4_BOOKS:
+            STOP_STAGE4_BOOKS.discard(book.id)
+            stopped = True
+            break
+
         task = db.scalar(
             select(TTSTask)
             .join(Line, TTSTask.line_id == Line.id)
@@ -145,6 +160,7 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
         remaining_tasks=remaining,
         book_status=book.status.value,
         final_audio_path=book.final_audio_path,
+        stopped=stopped,
     )
 
 
