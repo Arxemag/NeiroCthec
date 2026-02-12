@@ -125,7 +125,7 @@ services:
       S3_BUCKET: neurochtec-audio
       FREE_MAX_CHARS_PER_REQUEST: 6000
       FREE_MAX_REQUESTS_PER_DAY: 5
-    command: ["node", "apps/api/dist/worker.js"]
+    command: ["node", "apps/api/dist/src/worker.js"]
 
   web:
     build:
