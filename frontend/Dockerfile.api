@@ -5,16 +5,16 @@ COPY package*.json ./
 COPY apps/api/package*.json ./apps/api/
 COPY apps/web/package*.json ./apps/web/
 
+ENV NODE_ENV=development
+ENV NPM_CONFIG_PRODUCTION=false
 ENV NPM_CONFIG_INCLUDE=dev
-RUN npm ci --include=dev --workspaces --include-workspace-root
-RUN npm ci -w apps/api --include=dev
-RUN npm ci -w apps/web --include=dev
-RUN npm install -g prisma@6.3.1 typescript@5.7.3
+
+RUN npm ci --workspaces --include-workspace-root --include=dev
 
 COPY . .
 
-RUN prisma generate --schema=apps/api/prisma/schema.prisma
-RUN tsc -p apps/api/tsconfig.json
+RUN npm exec -w apps/api prisma generate -- --schema=apps/api/prisma/schema.prisma
+RUN npm exec -w apps/api nest build
 
 EXPOSE 4000
 
