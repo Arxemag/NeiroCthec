@@ -40,6 +40,24 @@ def _load_global_audio_config() -> dict:
     return {}
 
 
+def _merge_audio_config(base: dict, override: dict | None) -> dict:
+    if not isinstance(base, dict):
+        return override if isinstance(override, dict) else {}
+    merged = dict(base)
+    if not isinstance(override, dict):
+        return merged
+
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_audio_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _effective_audio_config(user_config: dict | None) -> dict:
+    return _merge_audio_config(_load_global_audio_config(), user_config)
+
 @router.post("/tts-next", response_model=TTSLeaseResponse)
 def tts_next(db: Session = Depends(get_db)):
     task = db.scalar(select(TTSTask).where(TTSTask.status == TaskStatus.pending).order_by(TTSTask.created_at.asc()))
@@ -60,7 +78,7 @@ def tts_next(db: Session = Depends(get_db)):
         text=payload["text"],
         voice=payload.get("voice", "narrator"),
         emotion=payload.get("emotion") or {},
-        audio_config=user_audio.config if user_audio else _load_global_audio_config(),
+        audio_config=_effective_audio_config(user_audio.config if user_audio else None),
     )
 
 
@@ -97,7 +115,7 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
     processed = 0
     stopped = False
     user_audio = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == book.user_id))
-    effective_audio_config = user_audio.config if user_audio else _load_global_audio_config()
+    effective_audio_config = _effective_audio_config(user_audio.config if user_audio else None)
     for _ in range(max(payload.max_tasks, 1)):
         if book.id in STOP_STAGE4_BOOKS:
             STOP_STAGE4_BOOKS.discard(book.id)

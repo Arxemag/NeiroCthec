@@ -42,6 +42,18 @@ def _load_global_audio_config() -> tuple[dict, str]:
     raise HTTPException(status_code=500, detail="audio.yaml was not found")
 
 
+def _merge_audio_config(base: dict, override: dict | None) -> dict:
+    merged = dict(base) if isinstance(base, dict) else {}
+    if not isinstance(override, dict):
+        return merged
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_audio_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 @router.post("/upload", response_model=BookUploadResponse)
 def upload_book(
     file: UploadFile = File(...),
@@ -101,7 +113,7 @@ def get_audio_config(user_id: str = Depends(get_current_user_id), db: Session = 
     global_config, global_path = _load_global_audio_config()
     custom = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == user_id))
     if custom:
-        return AudioConfigResponse(user_id=user_id, is_custom=True, source="user_db", source_path="table:user_audio_configs", config=custom.config)
+        return AudioConfigResponse(user_id=user_id, is_custom=True, source="user_db_merged", source_path="table:user_audio_configs + global_file", config=_merge_audio_config(global_config, custom.config))
     return AudioConfigResponse(user_id=user_id, is_custom=False, source="global_file", source_path=global_path, config=global_config)
 
 
@@ -114,6 +126,7 @@ def upsert_audio_config(
     if not isinstance(payload.config, dict):
         raise HTTPException(status_code=400, detail="config must be an object")
 
+    global_config, _ = _load_global_audio_config()
     row = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == user_id))
     if row:
         row.config = payload.config
@@ -123,7 +136,7 @@ def upsert_audio_config(
 
     db.commit()
     db.refresh(row)
-    return AudioConfigResponse(user_id=user_id, is_custom=True, source="user_db", source_path="table:user_audio_configs", config=row.config)
+    return AudioConfigResponse(user_id=user_id, is_custom=True, source="user_db_merged", source_path="table:user_audio_configs + global_file", config=_merge_audio_config(global_config, row.config))
 
 
 @router.delete("/settings/audio", response_model=AudioConfigResponse)
