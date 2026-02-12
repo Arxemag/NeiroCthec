@@ -35,6 +35,16 @@
 }
 ```
 
+## Режимы синтеза
+
+`stage4-tts` теперь поддерживает два режима:
+- `STAGE4_SYNTH_MODE=mock` — локальный генератор WAV внутри контейнера (режим по умолчанию).
+- `STAGE4_SYNTH_MODE=external` — проксирование синтеза в отдельный HTTP TTS-сервис.
+
+Для внешнего режима нужны переменные:
+- `EXTERNAL_TTS_URL` (по умолчанию `http://tts-engine:8020`)
+- `EXTERNAL_TTS_TIMEOUT_SEC` (по умолчанию `60`)
+
 ## Статусы
 
 - `PENDING`
@@ -47,20 +57,14 @@
 
 Stage 4:
 - принимает задачу;
-- синтезирует аудио;
+- отправляет задачу в выбранный backend синтеза;
 - сохраняет WAV в object storage;
 - сообщает `DONE/ERROR`.
 
 Stage 4 не хранит состояние книги/пользователя, не знает главы/сегменты и не решает судьбу пайплайна.
 
-## Внутренняя модель параллелизма
-
-- HTTP endpoint кладёт задачи в `asyncio.Queue`.
-- Worker(ы) забирают задачи из очереди.
-- `asyncio.Semaphore` ограничивает количество параллельных GPU-задач.
-
 ## Запуск
 
 ```bash
-docker compose -f app/docker-compose.yml up --build stage4-tts
+docker compose -f app/docker-compose.yml up --build stage4-tts tts-engine
 ```

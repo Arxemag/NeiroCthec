@@ -9,11 +9,22 @@ from fastapi import FastAPI, HTTPException
 from stage4_service.schemas import TTSRequest, TTSResponse, TTSStatus
 from stage4_service.storage import LocalObjectStorage
 import shutil
-from stage4_service.synth import MockSynthesizer
+from stage4_service.synth import ExternalHTTPSynthesizer, MockSynthesizer
 
 app = FastAPI(title="Stage4 TTS Worker")
 
-synth = MockSynthesizer()
+
+
+def _build_synth():
+    mode = os.getenv("STAGE4_SYNTH_MODE", "mock").strip().lower()
+    if mode == "external":
+        base_url = os.getenv("EXTERNAL_TTS_URL", "http://tts-engine:8020")
+        timeout = int(os.getenv("EXTERNAL_TTS_TIMEOUT_SEC", "60"))
+        return ExternalHTTPSynthesizer(base_url=base_url, timeout_sec=timeout)
+    return MockSynthesizer()
+
+
+synth = _build_synth()
 storage = LocalObjectStorage()
 core_internal_url = os.getenv("CORE_INTERNAL_URL", "http://api:8000/internal")
 

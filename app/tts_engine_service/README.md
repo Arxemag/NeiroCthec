@@ -1,0 +1,18 @@
+# Standalone TTS Engine
+
+Минимальный HTTP-сервис TTS, который можно запускать отдельно от core-пайплайна.
+
+## API
+- `GET /health`
+- `POST /synthesize`
+
+### Пример `POST /synthesize`
+```json
+{
+  "text": "Привет, это тест",
+  "speaker": "narrator",
+  "emotion": {"energy": 1.0, "tempo": 1.0, "pitch": 0.0}
+}
+```
+
+Возвращает `audio/wav` и заголовок `x-duration-ms`.
