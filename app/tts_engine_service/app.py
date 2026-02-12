@@ -90,6 +90,22 @@ def _resolve_coqui_language(request: SynthesizeRequest) -> str:
     return os.getenv("TTS_LANGUAGE", "ru")
 
 
+
+
+def _resolve_xtts_speed(request: SynthesizeRequest) -> float:
+    cfg = request.audio_config or {}
+    xtts = cfg.get("xtts") if isinstance(cfg, dict) else None
+
+    speed_base = 1.0
+    if isinstance(xtts, dict):
+        raw = xtts.get("speed_base")
+        if isinstance(raw, (int, float)):
+            speed_base = float(raw)
+
+    tempo = request.emotion.tempo if isinstance(request.emotion.tempo, (int, float)) else 1.0
+    final_speed = speed_base * float(tempo)
+    return max(0.5, min(final_speed, 2.0))
+
 def _resolve_coqui_speaker_wav(request: SynthesizeRequest) -> str | None:
     if request.voice_sample and request.voice_sample.strip():
         sample = Path(request.voice_sample.strip())
@@ -241,6 +257,8 @@ def synthesize(request: SynthesizeRequest) -> Response:
             "split_sentences": False,
             "language": language,
         }
+        if "xtts" in (_COQUI_MODEL_NAME or "").lower():
+            kwargs["speed"] = _resolve_xtts_speed(request)
         if speaker_wav:
             kwargs["speaker_wav"] = speaker_wav
         elif _coqui_requires_speaker_wav():

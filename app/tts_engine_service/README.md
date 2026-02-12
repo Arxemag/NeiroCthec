@@ -42,3 +42,5 @@
 
 
 Для production качества лучше закрепить `TTS_BACKEND=coqui` и проверить, что Coqui и voice samples корректно доступны.
+
+- Для XTTS учитывается `audio_config.xtts.speed_base` (умножается на `emotion.tempo`, итог clamp 0.5..2.0).
