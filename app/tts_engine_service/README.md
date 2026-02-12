@@ -25,7 +25,7 @@
 
 
 ## Переменные окружения
-- `TTS_BACKEND=coqui|mock|auto` (рекомендуется `coqui`, чтобы не получить тон-генератор).
+- `TTS_BACKEND=coqui|espeak|mock|auto` (рекомендуется `auto` (coqui -> espeak -> mock)).
 - `TTS_LANGUAGE=ru`
 - `TTS_VOICES_ROOT=/srv/storage/voices`
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import struct
+import subprocess
 import tempfile
 import wave
 from io import BytesIO
@@ -26,7 +28,7 @@ class SynthesizeRequest(BaseModel):
     emotion: EmotionPayload = Field(default_factory=EmotionPayload)
 
 
-_BACKEND = os.getenv("TTS_BACKEND", "coqui").strip().lower()  # coqui | mock | auto
+_BACKEND = os.getenv("TTS_BACKEND", "auto").strip().lower()  # coqui | espeak | mock | auto
 _COQUI = None
 _COQUI_ERROR: str | None = None
 
@@ -37,8 +39,10 @@ if _BACKEND in {"coqui", "auto"}:
         model_name = os.getenv("TTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
         use_gpu = os.getenv("TTS_USE_GPU", "false").lower() == "true"
         _COQUI = TTS(model_name=model_name, progress_bar=False, gpu=use_gpu)
-    except Exception as exc:  # backend init diagnostics
+    except Exception as exc:
         _COQUI_ERROR = str(exc)
+
+_ESPEAK_BIN = shutil.which("espeak") or shutil.which("espeak-ng")
 
 
 def _speaker_sample_for(speaker: str) -> str | None:
@@ -93,32 +97,65 @@ def _mock_synthesize(request: SynthesizeRequest) -> Response:
     )
 
 
+def _espeak_synthesize(request: SynthesizeRequest) -> Response:
+    if not _ESPEAK_BIN:
+        raise HTTPException(status_code=503, detail="espeak backend is not available")
+
+    voice = os.getenv("ESPEAK_VOICE", "ru")
+    # небольшая подстройка темпа из emotion.tempo
+    base_speed = int(os.getenv("ESPEAK_SPEED", "165"))
+    speed = max(80, min(260, int(base_speed * max(0.6, min(request.emotion.tempo, 1.6)))))
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        subprocess.run(
+            [_ESPEAK_BIN, "-v", voice, "-s", str(speed), "-w", str(tmp_path), request.text],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        content = tmp_path.read_bytes()
+        with wave.open(BytesIO(content), "rb") as wf:
+            duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+        return Response(content=content, media_type="audio/wav", headers={"x-duration-ms": str(duration_ms), "x-tts-backend": "espeak"})
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 @app.get("/health")
 def health() -> dict:
-    active = "coqui" if _COQUI is not None else "mock"
+    active = "coqui" if _COQUI is not None else "espeak" if _ESPEAK_BIN else "mock"
     return {
         "status": "ok",
         "requested_backend": _BACKEND,
         "active_backend": active,
         "coqui_ready": _COQUI is not None,
         "coqui_error": _COQUI_ERROR,
+        "espeak_ready": _ESPEAK_BIN is not None,
     }
 
 
 @app.post("/synthesize")
 def synthesize(request: SynthesizeRequest) -> Response:
-    # Force mock mode explicitly
     if _BACKEND == "mock":
         return _mock_synthesize(request)
 
-    # Coqui required mode
-    if _BACKEND == "coqui" and _COQUI is None:
-        raise HTTPException(status_code=503, detail=f"Coqui backend is not available: {_COQUI_ERROR}")
+    if _BACKEND == "espeak":
+        return _espeak_synthesize(request)
 
-    # auto mode fallback to mock only when coqui unavailable
-    if _COQUI is None:
-        return _mock_synthesize(request)
+    if _BACKEND == "coqui":
+        if _COQUI is None:
+            raise HTTPException(status_code=503, detail=f"Coqui backend is not available: {_COQUI_ERROR}")
+    elif _BACKEND == "auto":
+        if _COQUI is None and _ESPEAK_BIN:
+            return _espeak_synthesize(request)
+        if _COQUI is None and not _ESPEAK_BIN:
+            return _mock_synthesize(request)
 
+    # coqui synthesis path
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:

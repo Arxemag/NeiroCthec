@@ -45,7 +45,7 @@ services:
       context: .
       dockerfile: tts_engine_service/Dockerfile
     environment:
-      - TTS_BACKEND=coqui
+      - TTS_BACKEND=auto
       - TTS_LANGUAGE=ru
       - TTS_VOICES_ROOT=/srv/storage/voices
     volumes:
