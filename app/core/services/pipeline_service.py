@@ -120,9 +120,9 @@ def _has_audio_progress(db: Session, book_id: str) -> bool:
 
 def _replace_book_lines_and_tasks(db: Session, book: Book, stage3_payloads: list[dict]) -> None:
     """Persist stage0-3 result atomically for one book before Stage4."""
-    db.query(TTSTask).join(Line, TTSTask.line_id == Line.id).filter(Line.book_id == book.id).delete(
-        synchronize_session=False
-    )
+    line_ids = db.scalars(select(Line.id).where(Line.book_id == book.id)).all()
+    if line_ids:
+        db.query(TTSTask).filter(TTSTask.line_id.in_(line_ids)).delete(synchronize_session=False)
     db.query(Line).filter(Line.book_id == book.id).delete(synchronize_session=False)
 
     for line_payload in stage3_payloads:
