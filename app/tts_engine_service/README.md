@@ -47,3 +47,5 @@
 
 - В ответе `/synthesize` для Coqui добавляются debug-заголовки: `x-tts-language`, `x-tts-speaker`, `x-tts-speaker-wav`.
 - Для XTTS также применяются параметры из `audio_config.xtts`: `temperature`, `top_k`, `top_p`, `repetition_penalty`.
+
+- Относительные `voice_sample` пути вида `storage/...` автоматически нормализуются через `SHARED_STORAGE_ROOT` (по умолчанию `/srv/storage`).

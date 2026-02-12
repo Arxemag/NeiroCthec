@@ -86,3 +86,5 @@ docker compose -f app/docker-compose.yml up --build stage4-tts tts-engine
 ### Если видите 502 на `/internal/process-book-stage4`
 Частая причина: `tts-engine` не может поднять Coqui и в строгом режиме stage4 блокирует задачу.
 Проверьте `GET /health` у `tts-engine` и включите мягкий режим (`STAGE4_ENFORCE_TTS_BACKEND=false`) для непрерывной обработки.
+
+- Для нормализации относительных путей voice samples (например `storage/voices/male.wav`) используется `SHARED_STORAGE_ROOT` (по умолчанию `/srv/storage`).

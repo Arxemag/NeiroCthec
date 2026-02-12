@@ -76,6 +76,31 @@ def _normalize_speaker_label(speaker: str | None) -> str:
 
 
 
+def _resolve_shared_storage_path(path_value: str | None) -> str | None:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+
+    raw = path_value.strip()
+    p = Path(raw)
+    candidates: list[Path] = []
+
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        cwd = Path.cwd()
+        candidates.append(cwd / p)
+
+        shared_root = Path(os.getenv("SHARED_STORAGE_ROOT", "/srv/storage"))
+        if raw.startswith("storage/"):
+            candidates.append(shared_root / raw[len("storage/"):])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    return raw
+
+
 def _required_tts_backend() -> str:
     return os.getenv("STAGE4_EXPECT_TTS_BACKEND", "coqui").strip().lower()
 
@@ -103,8 +128,9 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
         voices = cfg.get("voices") if isinstance(cfg, dict) else None
         if isinstance(voices, dict):
             sample = voices.get(_normalize_speaker_label(request.speaker)) or voices.get("narrator")
-            if isinstance(sample, str) and sample.strip():
-                return sample.strip()
+            resolved = _resolve_shared_storage_path(sample if isinstance(sample, str) else None)
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved
         return None
 
     """Adapter for standalone TTS service with HTTP API."""

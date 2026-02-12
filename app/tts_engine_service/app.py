@@ -132,13 +132,35 @@ def _resolve_xtts_params(request: SynthesizeRequest) -> dict:
     _num("repetition_penalty", 1.0, 10.0)
     return out
 
+def _resolve_shared_voice_sample_path(path_value: str | None) -> str | None:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+
+    raw = path_value.strip()
+    p = Path(raw)
+    candidates: list[Path] = []
+
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        cwd = Path.cwd()
+        candidates.append(cwd / p)
+
+        shared_root = Path(os.getenv("SHARED_STORAGE_ROOT", "/srv/storage"))
+        if raw.startswith("storage/"):
+            candidates.append(shared_root / raw[len("storage/"):])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    return None
+
+
 def _resolve_coqui_speaker_wav(request: SynthesizeRequest) -> str | None:
-    if request.voice_sample and request.voice_sample.strip():
-        sample = Path(request.voice_sample.strip())
-        if not sample.is_absolute():
-            sample = Path.cwd() / sample
-        if sample.exists():
-            return str(sample)
+    resolved = _resolve_shared_voice_sample_path(request.voice_sample)
+    if resolved:
+        return resolved
 
     return _speaker_sample_for(_normalize_speaker_label(request.speaker))
 
