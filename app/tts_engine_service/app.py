@@ -59,6 +59,31 @@ def _speaker_sample_for(speaker: str) -> str | None:
     return str(sample) if sample.exists() else None
 
 
+def _resolve_coqui_language(request: SynthesizeRequest) -> str:
+    if request.language and request.language.strip():
+        return request.language.strip()
+
+    cfg = request.audio_config or {}
+    engine = cfg.get("engine") if isinstance(cfg, dict) else None
+    if isinstance(engine, dict):
+        lang = engine.get("language")
+        if isinstance(lang, str) and lang.strip():
+            return lang.strip()
+
+    return os.getenv("TTS_LANGUAGE", "ru")
+
+
+def _resolve_coqui_speaker_wav(request: SynthesizeRequest) -> str | None:
+    if request.voice_sample and request.voice_sample.strip():
+        sample = Path(request.voice_sample.strip())
+        if not sample.is_absolute():
+            sample = Path.cwd() / sample
+        if sample.exists():
+            return str(sample)
+
+    return _speaker_sample_for(request.speaker)
+
+
 def _mock_synthesize(request: SynthesizeRequest) -> Response:
     sample_rate = 22050
     text_len = max(len(request.text.strip()), 1)
@@ -174,15 +199,16 @@ def synthesize(request: SynthesizeRequest) -> Response:
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        speaker_wav = request.voice_sample or _speaker_sample_for(request.speaker)
+        speaker_wav = _resolve_coqui_speaker_wav(request)
+        language = _resolve_coqui_language(request)
         kwargs = {
             "text": request.text,
             "file_path": str(tmp_path),
             "split_sentences": False,
+            "language": language,
         }
         if speaker_wav:
             kwargs["speaker_wav"] = speaker_wav
-            kwargs["language"] = request.language or os.getenv("TTS_LANGUAGE", "ru")
 
         _COQUI.tts_to_file(**kwargs)
 
