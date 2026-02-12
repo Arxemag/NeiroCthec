@@ -43,7 +43,7 @@ export default function TestPage() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [debugEvents, setDebugEvents] = useState<string[]>([]);
-  const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
+  const [backendStatus, setBackendStatus] = useState<'unknown' | 'ok' | 'http_error' | 'unreachable'>('unknown');
   
   // Audio player state
   const [currentChapter, setCurrentChapter] = useState<number | null>(null);
@@ -65,17 +65,34 @@ export default function TestPage() {
     setDebugEvents((prev) => [line, ...prev].slice(0, 120));
   }, []);
 
+  const getReadableResponseBody = useCallback(async (res: Response) => {
+    const text = await res.text();
+    if (!text) return { parsed: {}, text: '' };
+    try {
+      return { parsed: JSON.parse(text) as Record<string, unknown>, text };
+    } catch {
+      return { parsed: { raw: text }, text };
+    }
+  }, []);
+
   const checkBackendConnectivity = useCallback(async () => {
     addDebugEvent('backend/check_start', { target: BACKEND_TARGET });
     try {
       const res = await fetch(`${API_BASE}/test/health`, { method: 'GET' });
-      setBackendReachable(res.ok);
-      addDebugEvent('backend/check_result', { status: res.status, ok: res.ok });
+      const body = await getReadableResponseBody(res);
+      setBackendStatus(res.ok ? 'ok' : 'http_error');
+      addDebugEvent('backend/check_result', {
+        status: res.status,
+        statusText: res.statusText,
+        ok: res.ok,
+        contentType: res.headers.get('content-type') || null,
+        body: body.parsed,
+      });
     } catch (e) {
-      setBackendReachable(false);
+      setBackendStatus('unreachable');
       addDebugEvent('backend/check_error', e instanceof Error ? e.message : 'network error');
     }
-  }, [addDebugEvent]);
+  }, [addDebugEvent, getReadableResponseBody]);
 
   // Polling for status updates
   const pollStatus = useCallback(async () => {
@@ -126,7 +143,7 @@ export default function TestPage() {
   }, [addDebugEvent, bookId]);
 
   useEffect(() => {
-    addDebugEvent('page/init', { backendTarget: BACKEND_TARGET });
+    addDebugEvent('page/init', { backendTarget: BACKEND_TARGET, href: typeof window !== 'undefined' ? window.location.href : 'server' });
     checkBackendConnectivity();
 
     if (bookId && !pollIntervalRef.current) {
@@ -176,30 +193,36 @@ export default function TestPage() {
       addDebugEvent('upload/http', { status: res.status, ok: res.ok });
       
       if (!res.ok) {
-        const errText = await res.text();
-        let parsed: Record<string, unknown> = {};
-        try {
-          parsed = errText ? JSON.parse(errText) : {};
-        } catch {
-          parsed = { raw: errText };
-        }
+        const body = await getReadableResponseBody(res);
+        const parsed = body.parsed;
 
-        const rawText = String((parsed.raw ?? errText ?? ''));
+        const rawText = String(parsed.raw ?? body.text ?? '');
         const refused = rawText.includes('ECONNREFUSED') || rawText.includes('Failed to proxy');
-        if (refused) {
-          setBackendReachable(false);
-        }
+        const backendHttpError = !refused && res.status >= 500;
 
-        addDebugEvent('upload/error_response', { ...parsed, refused });
+        if (refused) setBackendStatus('unreachable');
+        else if (backendHttpError) setBackendStatus('http_error');
+
+        addDebugEvent('upload/error_response', {
+          refused,
+          backendHttpError,
+          status: res.status,
+          statusText: res.statusText,
+          contentType: res.headers.get('content-type') || null,
+          body: parsed,
+        });
 
         const friendly = refused
           ? `Не удалось достучаться до Python backend (${BACKEND_TARGET}). Проверь, что сервис запущен и NEXT_PUBLIC_BACKEND_URL задан корректно.`
-          : ((parsed.detail as string) || (parsed.message as string) || `Upload failed: ${res.status}`);
+          : backendHttpError
+            ? `Python backend доступен, но вернул ${res.status} (${res.statusText || 'Internal Server Error'}). Проверь логи backend сервиса.`
+            : ((parsed.detail as string) || (parsed.message as string) || `Upload failed: ${res.status}`);
 
         throw new Error(friendly);
       }
       
       const data = await res.json();
+      setBackendStatus('ok');
       addDebugEvent('upload/success', data);
       setBookId(data.id);
       setStatus({ stage: data.status, progress: 0, total_lines: 0, tts_done: 0 });
@@ -207,7 +230,7 @@ export default function TestPage() {
       const msg = e?.message || 'Upload failed';
       const looksLikeNetwork = msg.includes('Failed to fetch') || msg.includes('NetworkError');
       if (looksLikeNetwork) {
-        setBackendReachable(false);
+        setBackendStatus('unreachable');
       }
       setError(msg);
       addDebugEvent('upload/catch', { message: msg, looksLikeNetwork });
@@ -388,19 +411,22 @@ export default function TestPage() {
         )}
 
         <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700">
-        <div><strong>Backend target:</strong> {BACKEND_TARGET}</div>
-        <div>
-          <strong>Connectivity:</strong>{' '}
-          {backendReachable === null ? 'не проверено' : backendReachable ? 'ok' : 'нет соединения'}
-          <button
-            type="button"
-            onClick={checkBackendConnectivity}
-            className="ml-2 text-[var(--color-secondary)] hover:underline"
-          >
-            Проверить снова
-          </button>
+          <div><strong>Backend target:</strong> {BACKEND_TARGET}</div>
+          <div>
+            <strong>Connectivity:</strong>{' '}
+            {backendStatus === 'unknown' && 'не проверено'}
+            {backendStatus === 'ok' && 'ok'}
+            {backendStatus === 'http_error' && 'доступен, но отвечает ошибкой (5xx)'}
+            {backendStatus === 'unreachable' && 'нет соединения (ECONNREFUSED/Network)'}
+            <button
+              type="button"
+              onClick={checkBackendConnectivity}
+              className="ml-2 text-[var(--color-secondary)] hover:underline"
+            >
+              Проверить снова
+            </button>
+          </div>
         </div>
-      </div>
 
       {error && (
           <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
