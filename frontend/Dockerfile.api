@@ -9,6 +9,7 @@ ENV NPM_CONFIG_INCLUDE=dev
 RUN npm ci --include=dev --workspaces --include-workspace-root
 RUN npm ci -w apps/api --include=dev
 RUN npm ci -w apps/web --include=dev
+RUN npm install -g @nestjs/cli@10
 
 COPY . .
 
