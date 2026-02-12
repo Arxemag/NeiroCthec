@@ -6,6 +6,7 @@ import { Button } from '../../components/ui';
 
 // API calls go through Next.js proxy (see next.config.mjs rewrites)
 const API_BASE = '';
+const BACKEND_TARGET = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 type BookStatus = {
   stage: string;
@@ -41,6 +42,8 @@ export default function TestPage() {
   const [lines, setLines] = useState<LineInfo[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debugEvents, setDebugEvents] = useState<string[]>([]);
+  const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
   
   // Audio player state
   const [currentChapter, setCurrentChapter] = useState<number | null>(null);
@@ -55,20 +58,46 @@ export default function TestPage() {
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const addDebugEvent = useCallback((message: string, payload?: unknown) => {
+    const line = `[${new Date().toLocaleTimeString('ru-RU')}] ${message}${
+      payload !== undefined ? `: ${JSON.stringify(payload)}` : ''
+    }`;
+    setDebugEvents((prev) => [line, ...prev].slice(0, 120));
+  }, []);
+
+  const checkBackendConnectivity = useCallback(async () => {
+    addDebugEvent('backend/check_start', { target: BACKEND_TARGET });
+    try {
+      const res = await fetch(`${API_BASE}/test/health`, { method: 'GET' });
+      setBackendReachable(res.ok);
+      addDebugEvent('backend/check_result', { status: res.status, ok: res.ok });
+    } catch (e) {
+      setBackendReachable(false);
+      addDebugEvent('backend/check_error', e instanceof Error ? e.message : 'network error');
+    }
+  }, [addDebugEvent]);
+
   // Polling for status updates
   const pollStatus = useCallback(async () => {
     if (!bookId) return;
     
     try {
+      addDebugEvent('poll/start', { bookId });
       const [statusRes, chaptersRes, linesRes] = await Promise.all([
         fetch(`${API_BASE}/test/${bookId}/status`),
         fetch(`${API_BASE}/test/${bookId}/chapters`),
         fetch(`${API_BASE}/test/${bookId}/lines`),
       ]);
+      addDebugEvent('poll/http', {
+        status: statusRes.status,
+        chapters: chaptersRes.status,
+        lines: linesRes.status,
+      });
       
       if (statusRes.ok) {
         const statusData = await statusRes.json();
         setStatus(statusData);
+        addDebugEvent('poll/status', statusData);
         
         // Stop polling when completed or error
         if (statusData.stage === 'completed' || statusData.stage === 'error') {
@@ -82,18 +111,24 @@ export default function TestPage() {
       if (chaptersRes.ok) {
         const chaptersData = await chaptersRes.json();
         setChapters(chaptersData.chapters || []);
+        addDebugEvent('poll/chapters_count', { count: (chaptersData.chapters || []).length });
       }
       
       if (linesRes.ok) {
         const linesData = await linesRes.json();
         setLines(linesData.lines || []);
+        addDebugEvent('poll/lines_count', { count: (linesData.lines || []).length });
       }
     } catch (e) {
       console.error('Polling error:', e);
+      addDebugEvent('poll/error', e instanceof Error ? e.message : 'unknown');
     }
-  }, [bookId]);
+  }, [addDebugEvent, bookId]);
 
   useEffect(() => {
+    addDebugEvent('page/init', { backendTarget: BACKEND_TARGET });
+    checkBackendConnectivity();
+
     if (bookId && !pollIntervalRef.current) {
       pollStatus();
       pollIntervalRef.current = setInterval(pollStatus, 3000);
@@ -105,21 +140,30 @@ export default function TestPage() {
         pollIntervalRef.current = null;
       }
     };
-  }, [bookId, pollStatus]);
+  }, [addDebugEvent, bookId, checkBackendConnectivity, pollStatus]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
       setFile(selectedFile);
       setError(null);
+      addDebugEvent('file/selected', {
+        name: selectedFile.name,
+        type: selectedFile.type,
+        size: selectedFile.size,
+      });
     }
   };
 
   const handleUpload = async () => {
-    if (!file) return;
+    if (!file) {
+      addDebugEvent('upload/click_without_file');
+      return;
+    }
     
     setUploading(true);
     setError(null);
+    addDebugEvent('upload/start', { file: file.name, size: file.size });
     
     try {
       const formData = new FormData();
@@ -129,17 +173,44 @@ export default function TestPage() {
         method: 'POST',
         body: formData,
       });
+      addDebugEvent('upload/http', { status: res.status, ok: res.ok });
       
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Upload failed: ${res.status}`);
+        const errText = await res.text();
+        let parsed: Record<string, unknown> = {};
+        try {
+          parsed = errText ? JSON.parse(errText) : {};
+        } catch {
+          parsed = { raw: errText };
+        }
+
+        const rawText = String((parsed.raw ?? errText ?? ''));
+        const refused = rawText.includes('ECONNREFUSED') || rawText.includes('Failed to proxy');
+        if (refused) {
+          setBackendReachable(false);
+        }
+
+        addDebugEvent('upload/error_response', { ...parsed, refused });
+
+        const friendly = refused
+          ? `Не удалось достучаться до Python backend (${BACKEND_TARGET}). Проверь, что сервис запущен и NEXT_PUBLIC_BACKEND_URL задан корректно.`
+          : ((parsed.detail as string) || (parsed.message as string) || `Upload failed: ${res.status}`);
+
+        throw new Error(friendly);
       }
       
       const data = await res.json();
+      addDebugEvent('upload/success', data);
       setBookId(data.id);
       setStatus({ stage: data.status, progress: 0, total_lines: 0, tts_done: 0 });
     } catch (e: any) {
-      setError(e.message || 'Upload failed');
+      const msg = e?.message || 'Upload failed';
+      const looksLikeNetwork = msg.includes('Failed to fetch') || msg.includes('NetworkError');
+      if (looksLikeNetwork) {
+        setBackendReachable(false);
+      }
+      setError(msg);
+      addDebugEvent('upload/catch', { message: msg, looksLikeNetwork });
     } finally {
       setUploading(false);
     }
@@ -147,6 +218,7 @@ export default function TestPage() {
 
   const playChapter = (chapter: Chapter) => {
     if (!chapter.audio_url) return;
+    addDebugEvent('audio/play_chapter', { chapterId: chapter.chapter_id, title: chapter.title });
     
     setCurrentChapter(chapter.chapter_id);
     setCurrentLine(null);
@@ -160,6 +232,7 @@ export default function TestPage() {
 
   const playLine = (line: LineInfo) => {
     if (!line.audio_url) return;
+    addDebugEvent('audio/play_line', { lineId: line.id, idx: line.idx });
     
     setCurrentLine(line.id);
     setCurrentChapter(null);
@@ -179,6 +252,7 @@ export default function TestPage() {
         audioRef.current.play();
       }
       setIsPlaying(!isPlaying);
+      addDebugEvent('audio/toggle', { isPlaying: !isPlaying });
     }
   };
 
@@ -199,6 +273,7 @@ export default function TestPage() {
     if (audioRef.current) {
       audioRef.current.currentTime = time;
       setCurrentTime(time);
+      addDebugEvent('audio/seek', { time });
     }
   };
 
@@ -209,12 +284,14 @@ export default function TestPage() {
       audioRef.current.volume = vol;
     }
     setIsMuted(vol === 0);
+    addDebugEvent('audio/volume', { volume: vol });
   };
 
   const toggleMute = () => {
     if (audioRef.current) {
       audioRef.current.muted = !isMuted;
       setIsMuted(!isMuted);
+      addDebugEvent('audio/mute', { muted: !isMuted });
     }
   };
 
@@ -310,7 +387,22 @@ export default function TestPage() {
           </div>
         )}
 
-        {error && (
+        <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700">
+        <div><strong>Backend target:</strong> {BACKEND_TARGET}</div>
+        <div>
+          <strong>Connectivity:</strong>{' '}
+          {backendReachable === null ? 'не проверено' : backendReachable ? 'ok' : 'нет соединения'}
+          <button
+            type="button"
+            onClick={checkBackendConnectivity}
+            className="ml-2 text-[var(--color-secondary)] hover:underline"
+          >
+            Проверить снова
+          </button>
+        </div>
+      </div>
+
+      {error && (
           <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
             {error}
           </div>
@@ -533,6 +625,7 @@ export default function TestPage() {
                   clearInterval(pollIntervalRef.current);
                   pollIntervalRef.current = null;
                 }
+                addDebugEvent('session/reset');
               }}
               className="text-sm text-zinc-500 hover:text-[var(--color-secondary)] hover:underline"
             >
@@ -540,6 +633,26 @@ export default function TestPage() {
             </button>
           </div>
         )}
+
+        <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-zinc-700">Debug события (клики/ответы API)</h2>
+            <button
+              type="button"
+              onClick={() => setDebugEvents([])}
+              className="text-xs text-zinc-500 hover:text-zinc-700"
+            >
+              Очистить
+            </button>
+          </div>
+          {debugEvents.length === 0 ? (
+            <p className="text-xs text-zinc-500">Пока пусто. Нажмите кнопки выше, чтобы увидеть подробные события.</p>
+          ) : (
+            <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap rounded-lg bg-zinc-900 p-3 text-xs text-zinc-100">
+              {debugEvents.join('\n')}
+            </pre>
+          )}
+        </div>
       </div>
     </div>
   );

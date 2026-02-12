@@ -38,11 +38,14 @@ export default function AdminUsersPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-4">
         <Link href="/app/admin" className="text-sm text-[#7A6CFF] hover:underline">
           ← Админ-панель
         </Link>
         <h1 className="text-2xl font-semibold text-[var(--color-primary)]">Пользователи</h1>
+        <Link href="/app/admin/users/raw" className="text-sm text-[#7A6CFF] hover:underline">
+          Все значения (ID = *)
+        </Link>
       </div>
 
       {error && (
