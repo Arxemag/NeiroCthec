@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import math
 import struct
 import wave
@@ -73,6 +74,16 @@ def _normalize_speaker_label(speaker: str | None) -> str:
     return "narrator"
 
 
+
+
+def _required_tts_backend() -> str:
+    return os.getenv("STAGE4_EXPECT_TTS_BACKEND", "coqui").strip().lower()
+
+
+def _is_backend_enforced() -> bool:
+    return os.getenv("STAGE4_ENFORCE_TTS_BACKEND", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class ExternalHTTPSynthesizer(BaseSynthesizer):
     @staticmethod
     def _resolve_language(request: TTSRequest) -> str | None:
@@ -116,6 +127,14 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
             timeout=self.timeout_sec,
         )
         response.raise_for_status()
+
+        reported_backend = (response.headers.get("x-tts-backend", "") or "").strip().lower()
+        expected_backend = _required_tts_backend()
+        if _is_backend_enforced() and expected_backend and reported_backend and reported_backend != expected_backend:
+            raise RuntimeError(
+                f"Unexpected TTS backend: expected '{expected_backend}', got '{reported_backend}'. "
+                "Check tts-engine configuration to avoid degraded synthesis quality."
+            )
 
         duration_ms = int(response.headers.get("x-duration-ms", "0") or "0")
         output_path.parent.mkdir(parents=True, exist_ok=True)

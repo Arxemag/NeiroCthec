@@ -68,3 +68,16 @@ Stage 4 не хранит состояние книги/пользователя
 ```bash
 docker compose -f app/docker-compose.yml up --build stage4-tts tts-engine
 ```
+
+
+### Почему в проекте 2 TTS-сервиса
+Это нормально и задумано архитектурой:
+- `stage4-tts` — orchestration/worker (берёт задачи, сохраняет файлы, отдаёт статус).
+- `tts-engine` — собственно движок синтеза (Coqui/espeak/mock).
+
+Проблема возникает, когда `tts-engine` уходит в деградированный backend (`espeak`/`mock`) и это не видно сразу.
+Для защиты добавлены переменные в `stage4-tts`:
+- `STAGE4_ENFORCE_TTS_BACKEND=true`
+- `STAGE4_EXPECT_TTS_BACKEND=coqui`
+
+`stage4-tts` проверяет HTTP-заголовок `x-tts-backend` от `tts-engine` и вернёт ошибку, если backend не совпадает с ожидаемым.
