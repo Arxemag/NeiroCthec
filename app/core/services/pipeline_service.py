@@ -95,6 +95,7 @@ def run_stage3(stage2_lines: list) -> list[dict]:
                 }
             )
 
+        tts_text_line = " ".join(seg.get("tts_text", "").strip() for seg in serialized_segments if seg.get("tts_text"))
         rendered.append(
             {
                 "idx": idx,
@@ -102,6 +103,7 @@ def run_stage3(stage2_lines: list) -> list[dict]:
                 "type": line.type or "narrator",
                 "speaker": line.speaker or "narrator",
                 "original": line.original,
+                "tts_text": tts_text_line or line.original,
                 "segments": serialized_segments,
                 "emotion": dict(DEFAULT_EMOTION),
                 "tts_status": LineStatus.tts_pending,
@@ -149,7 +151,8 @@ def _replace_book_lines_and_tasks(db: Session, book: Book, stage3_payloads: list
                     "line_id": db_line.id,
                     "user_id": book.user_id,
                     "book_id": book.id,
-                    "text": db_line.original,
+                    "text": line_payload.get("tts_text") or db_line.original,
+                    "original_text": db_line.original,
                     "emotion": db_line.emotion,
                     "voice": db_line.speaker,
                     "chapter_id": line_payload["chapter_id"],

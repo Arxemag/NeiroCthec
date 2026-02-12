@@ -16,3 +16,9 @@
 ```
 
 Возвращает `audio/wav` и заголовок `x-duration-ms`.
+
+## Бэкенды синтеза
+- Если установлен `TTS` (Coqui), сервис использует реальный синтезатор и voice samples из `storage/voices/{narrator,male,female}.wav`.
+- Если Coqui недоступен, включается mock-tone fallback (для контрактной отладки).
+
+`GET /health` возвращает активный backend в поле `backend` (`coqui` или `mock`).
