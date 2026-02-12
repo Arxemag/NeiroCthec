@@ -13,6 +13,7 @@ docker compose up --build -d
 
 Поднимает:
 - `web` (`http://localhost:3000`)
+- В Dockerfile для web/api используется `npm ci --include=dev`, чтобы на этапе сборки были доступны TypeScript/Next/Nest dev-зависимости.
 - `api` Nest (`http://localhost:4000`)
 - `worker`
 - `postgres` (`5432`), `redis` (`6379`), `minio` (`9000/9001`)
