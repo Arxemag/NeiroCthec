@@ -9,12 +9,12 @@ ENV NPM_CONFIG_INCLUDE=dev
 RUN npm ci --include=dev --workspaces --include-workspace-root
 RUN npm ci -w apps/api --include=dev
 RUN npm ci -w apps/web --include=dev
-RUN npm install -g @nestjs/cli@10 prisma@6.3.1
+RUN npm install -g prisma@6.3.1 typescript@5.7.3
 
 COPY . .
 
 RUN prisma generate --schema=apps/api/prisma/schema.prisma
-RUN npm run -w apps/api build
+RUN tsc -p apps/api/tsconfig.json
 
 EXPOSE 4000
 
