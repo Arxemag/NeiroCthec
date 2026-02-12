@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import traceback
 import uuid
 from pathlib import Path
 
@@ -26,6 +27,13 @@ OUTPUT_ROOT = STORAGE_ROOT / "audio"
 TEST_USER_ID = "test-anonymous-user"
 
 
+@router.get("/health")
+def test_health(db: Session = Depends(get_db)):
+    """Health endpoint for test routes (used by frontend diagnostics)."""
+    db.execute(select(1))
+    return {"status": "ok", "service": "test", "user_id": TEST_USER_ID}
+
+
 @router.post("/upload", response_model=BookUploadResponse)
 def test_upload_book(
     file: UploadFile = File(...),
@@ -47,10 +55,22 @@ def test_upload_book(
     db.flush()
 
     # Run stages 0-3 synchronously
-    run_contract_pipeline(db, book, OUTPUT_ROOT)
-    db.commit()
-    db.refresh(book)
-    return BookUploadResponse(id=book.id, status=book.status.value)
+    try:
+        run_contract_pipeline(db, book, OUTPUT_ROOT)
+        db.commit()
+        db.refresh(book)
+        return BookUploadResponse(id=book.id, status=book.status.value)
+    except Exception as e:
+        db.rollback()
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": str(e),
+                "type": type(e).__name__,
+                "book_id": book_id,
+            },
+        )
 
 
 @router.get("/{book_id}/status", response_model=BookStatusResponse)

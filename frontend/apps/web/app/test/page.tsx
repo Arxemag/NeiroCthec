@@ -78,15 +78,32 @@ export default function TestPage() {
   const checkBackendConnectivity = useCallback(async () => {
     addDebugEvent('backend/check_start', { target: BACKEND_TARGET });
     try {
-      const res = await fetch(`${API_BASE}/test/health`, { method: 'GET' });
-      const body = await getReadableResponseBody(res);
-      setBackendStatus(res.ok ? 'ok' : 'http_error');
+      const [proxyRes, directRes] = await Promise.all([
+        fetch(`${API_BASE}/test/health`, { method: 'GET' }),
+        fetch(`${BACKEND_TARGET}/test/health`, { method: 'GET' }),
+      ]);
+
+      const proxyBody = await getReadableResponseBody(proxyRes);
+      const directBody = await getReadableResponseBody(directRes);
+
+      const ok = proxyRes.ok || directRes.ok;
+      setBackendStatus(ok ? 'ok' : 'http_error');
+
       addDebugEvent('backend/check_result', {
-        status: res.status,
-        statusText: res.statusText,
-        ok: res.ok,
-        contentType: res.headers.get('content-type') || null,
-        body: body.parsed,
+        proxy: {
+          status: proxyRes.status,
+          statusText: proxyRes.statusText,
+          ok: proxyRes.ok,
+          contentType: proxyRes.headers.get('content-type') || null,
+          body: proxyBody.parsed,
+        },
+        direct: {
+          status: directRes.status,
+          statusText: directRes.statusText,
+          ok: directRes.ok,
+          contentType: directRes.headers.get('content-type') || null,
+          body: directBody.parsed,
+        },
       });
     } catch (e) {
       setBackendStatus('unreachable');
@@ -212,11 +229,18 @@ export default function TestPage() {
           body: parsed,
         });
 
+        const detailText =
+          typeof parsed.detail === 'string'
+            ? parsed.detail
+            : parsed.detail
+              ? JSON.stringify(parsed.detail)
+              : undefined;
+
         const friendly = refused
           ? `Не удалось достучаться до Python backend (${BACKEND_TARGET}). Проверь, что сервис запущен и NEXT_PUBLIC_BACKEND_URL задан корректно.`
           : backendHttpError
-            ? `Python backend доступен, но вернул ${res.status} (${res.statusText || 'Internal Server Error'}). Проверь логи backend сервиса.`
-            : ((parsed.detail as string) || (parsed.message as string) || `Upload failed: ${res.status}`);
+            ? `Python backend доступен, но вернул ${res.status} (${res.statusText || 'Internal Server Error'}). Детали: ${detailText || 'нет'} . Проверь логи backend сервиса.`
+            : (detailText || (parsed.message as string) || `Upload failed: ${res.status}`);
 
         throw new Error(friendly);
       }
