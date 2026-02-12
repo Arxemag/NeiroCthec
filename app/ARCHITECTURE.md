@@ -6,7 +6,7 @@
 
 ## 1) Общая схема сервисов
 
-Система разделена на 3 сервиса:
+Система разделена на 4 сервиса (четвёртый опциональный):
 
 1. **api** (FastAPI, CPU)
    - публичные роуты книг;
@@ -17,13 +17,20 @@
    - берёт TTS-задачи из Core через `/internal/tts-next`;
    - генерирует WAV;
    - подтверждает результат через `/internal/tts-complete`.
-3. **postgres**
+3. **tts-engine** (опционально, отдельный контейнер или внешний хост)
+   - самостоятельный HTTP TTS backend (`POST /synthesize`), который Stage4 может дергать по сети;
+   - позволяет держать синтезатор запущенным отдельно от lifecycle core-контейнеров.
+4. **postgres**
    - единственный источник состояния (book/line/task статусы).
 
 Compose-расклад:
 - `api` собирается из `Dockerfile.api`.
 - `stage4-tts` собирается из `stage4_service/Dockerfile`.
 - `postgres` поднимается отдельным сервисом с healthcheck.
+
+Stage4 может работать в двух режимах:
+- `STAGE4_SYNTH_MODE=mock` — локальный синтез внутри stage4-tts;
+- `STAGE4_SYNTH_MODE=external` — проксирование в `EXTERNAL_TTS_URL` (например, `http://tts-engine:8020`).
 
 ---
 

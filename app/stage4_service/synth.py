@@ -2,11 +2,20 @@ from pathlib import Path
 import math
 import struct
 import wave
+from abc import ABC, abstractmethod
+
+import requests
 
 from stage4_service.schemas import TTSRequest
 
 
-class MockSynthesizer:
+class BaseSynthesizer(ABC):
+    @abstractmethod
+    def synthesize(self, request: TTSRequest, output_path: Path) -> int:
+        """Synthesize speech and store audio into output_path, returning duration_ms."""
+
+
+class MockSynthesizer(BaseSynthesizer):
     """MVP-синтезатор: генерирует простой сигнал и сохраняет WAV (без внешних audio libs)."""
 
     sample_rate = 22050
@@ -46,3 +55,28 @@ class MockSynthesizer:
             wav_file.writeframes(frames)
 
         return int(duration_sec * 1000)
+
+
+class ExternalHTTPSynthesizer(BaseSynthesizer):
+    """Adapter for standalone TTS service with HTTP API."""
+
+    def __init__(self, base_url: str, timeout_sec: int = 60):
+        self.base_url = base_url.rstrip("/")
+        self.timeout_sec = timeout_sec
+
+    def synthesize(self, request: TTSRequest, output_path: Path) -> int:
+        response = requests.post(
+            f"{self.base_url}/synthesize",
+            json={
+                "text": request.text,
+                "speaker": request.speaker,
+                "emotion": request.emotion.model_dump(),
+            },
+            timeout=self.timeout_sec,
+        )
+        response.raise_for_status()
+
+        duration_ms = int(response.headers.get("x-duration-ms", "0") or "0")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(response.content)
+        return duration_ms

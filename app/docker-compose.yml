@@ -28,12 +28,24 @@ services:
       - STAGE4_WORKERS=1
       - STAGE4_OBJECT_ROOT=/srv/storage/object
       - STAGE4_OBJECT_URI_PREFIX=s3://audio
+      - STAGE4_SYNTH_MODE=external
+      - EXTERNAL_TTS_URL=http://tts-engine:8020
     command: python3 -m uvicorn stage4_service.app:app --host 0.0.0.0 --port 8010 --reload
     volumes:
       - ./:/srv
       - ./storage:/srv/storage
+    depends_on:
+      tts-engine:
+        condition: service_started
     ports:
       - "8010:8010"
+
+  tts-engine:
+    build:
+      context: .
+      dockerfile: tts_engine_service/Dockerfile
+    ports:
+      - "8020:8020"
 
   postgres:
     image: postgres:16-alpine
