@@ -6,6 +6,7 @@ import { Button } from '../../components/ui';
 
 // API calls go through Next.js proxy (see next.config.mjs rewrites)
 const API_BASE = '';
+const BACKEND_TARGET = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 type BookStatus = {
   stage: string;
@@ -42,6 +43,7 @@ export default function TestPage() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [debugEvents, setDebugEvents] = useState<string[]>([]);
+  const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
   
   // Audio player state
   const [currentChapter, setCurrentChapter] = useState<number | null>(null);
@@ -62,6 +64,18 @@ export default function TestPage() {
     }`;
     setDebugEvents((prev) => [line, ...prev].slice(0, 120));
   }, []);
+
+  const checkBackendConnectivity = useCallback(async () => {
+    addDebugEvent('backend/check_start', { target: BACKEND_TARGET });
+    try {
+      const res = await fetch(`${API_BASE}/test/health`, { method: 'GET' });
+      setBackendReachable(res.ok);
+      addDebugEvent('backend/check_result', { status: res.status, ok: res.ok });
+    } catch (e) {
+      setBackendReachable(false);
+      addDebugEvent('backend/check_error', e instanceof Error ? e.message : 'network error');
+    }
+  }, [addDebugEvent]);
 
   // Polling for status updates
   const pollStatus = useCallback(async () => {
@@ -112,6 +126,9 @@ export default function TestPage() {
   }, [addDebugEvent, bookId]);
 
   useEffect(() => {
+    addDebugEvent('page/init', { backendTarget: BACKEND_TARGET });
+    checkBackendConnectivity();
+
     if (bookId && !pollIntervalRef.current) {
       pollStatus();
       pollIntervalRef.current = setInterval(pollStatus, 3000);
@@ -123,7 +140,7 @@ export default function TestPage() {
         pollIntervalRef.current = null;
       }
     };
-  }, [bookId, pollStatus]);
+  }, [addDebugEvent, bookId, checkBackendConnectivity, pollStatus]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
@@ -166,8 +183,20 @@ export default function TestPage() {
         } catch {
           parsed = { raw: errText };
         }
-        addDebugEvent('upload/error_response', parsed);
-        throw new Error((parsed.detail as string) || (parsed.message as string) || `Upload failed: ${res.status}`);
+
+        const rawText = String((parsed.raw ?? errText ?? ''));
+        const refused = rawText.includes('ECONNREFUSED') || rawText.includes('Failed to proxy');
+        if (refused) {
+          setBackendReachable(false);
+        }
+
+        addDebugEvent('upload/error_response', { ...parsed, refused });
+
+        const friendly = refused
+          ? `Не удалось достучаться до Python backend (${BACKEND_TARGET}). Проверь, что сервис запущен и NEXT_PUBLIC_BACKEND_URL задан корректно.`
+          : ((parsed.detail as string) || (parsed.message as string) || `Upload failed: ${res.status}`);
+
+        throw new Error(friendly);
       }
       
       const data = await res.json();
@@ -175,8 +204,13 @@ export default function TestPage() {
       setBookId(data.id);
       setStatus({ stage: data.status, progress: 0, total_lines: 0, tts_done: 0 });
     } catch (e: any) {
-      setError(e.message || 'Upload failed');
-      addDebugEvent('upload/catch', e?.message || 'Upload failed');
+      const msg = e?.message || 'Upload failed';
+      const looksLikeNetwork = msg.includes('Failed to fetch') || msg.includes('NetworkError');
+      if (looksLikeNetwork) {
+        setBackendReachable(false);
+      }
+      setError(msg);
+      addDebugEvent('upload/catch', { message: msg, looksLikeNetwork });
     } finally {
       setUploading(false);
     }
@@ -353,7 +387,22 @@ export default function TestPage() {
           </div>
         )}
 
-        {error && (
+        <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700">
+        <div><strong>Backend target:</strong> {BACKEND_TARGET}</div>
+        <div>
+          <strong>Connectivity:</strong>{' '}
+          {backendReachable === null ? 'не проверено' : backendReachable ? 'ok' : 'нет соединения'}
+          <button
+            type="button"
+            onClick={checkBackendConnectivity}
+            className="ml-2 text-[var(--color-secondary)] hover:underline"
+          >
+            Проверить снова
+          </button>
+        </div>
+      </div>
+
+      {error && (
           <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
             {error}
           </div>
