@@ -19,6 +19,12 @@ export function HeroCtaButtons() {
 
   return (
     <div className="mt-8 flex flex-wrap gap-3">
+      <Link
+        href="/test"
+        className="inline-flex items-center rounded-lg border border-zinc-300/60 bg-zinc-100/70 px-4 py-2 font-medium text-zinc-800 hover:bg-zinc-200/80"
+      >
+        Открыть тест озвучки без регистрации
+      </Link>
       {!isLoggedIn && (
         <Link
           href="/auth/register"
