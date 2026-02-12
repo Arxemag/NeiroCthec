@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import requests
+import yaml
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -26,6 +27,17 @@ router = APIRouter()
 OUTPUT_ROOT = Path("storage/audio")
 STAGE4_TTS_URL = os.getenv("STAGE4_TTS_URL", "http://stage4-tts:8010")
 STOP_STAGE4_BOOKS: set[str] = set()
+AUDIO_CONFIG_PATHS = (Path("audio.yaml"), Path("app/audio.yaml"))
+
+
+def _load_global_audio_config() -> dict:
+    for path in AUDIO_CONFIG_PATHS:
+        if path.exists():
+            with path.open("r", encoding="utf-8") as fh:
+                loaded = yaml.safe_load(fh) or {}
+                if isinstance(loaded, dict):
+                    return loaded
+    return {}
 
 
 @router.post("/tts-next", response_model=TTSLeaseResponse)
@@ -48,7 +60,7 @@ def tts_next(db: Session = Depends(get_db)):
         text=payload["text"],
         voice=payload.get("voice", "narrator"),
         emotion=payload.get("emotion") or {},
-        audio_config=user_audio.config if user_audio else None,
+        audio_config=user_audio.config if user_audio else _load_global_audio_config(),
     )
 
 
@@ -84,6 +96,8 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
 
     processed = 0
     stopped = False
+    user_audio = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == book.user_id))
+    effective_audio_config = user_audio.config if user_audio else _load_global_audio_config()
     for _ in range(max(payload.max_tasks, 1)):
         if book.id in STOP_STAGE4_BOOKS:
             STOP_STAGE4_BOOKS.discard(book.id)
@@ -115,6 +129,7 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
                     "text": payload_row["text"],
                     "speaker": payload_row.get("voice", "narrator"),
                     "emotion": payload_row.get("emotion") or {},
+                    "audio_config": effective_audio_config,
                 },
                 timeout=120,
             )

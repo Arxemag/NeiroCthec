@@ -26,6 +26,9 @@ class SynthesizeRequest(BaseModel):
     text: str = Field(min_length=1)
     speaker: str = "narrator"
     emotion: EmotionPayload = Field(default_factory=EmotionPayload)
+    language: str | None = None
+    voice_sample: str | None = None
+    audio_config: dict | None = None
 
 
 _BACKEND = os.getenv("TTS_BACKEND", "auto").strip().lower()  # coqui | espeak | mock | auto
@@ -97,11 +100,23 @@ def _mock_synthesize(request: SynthesizeRequest) -> Response:
     )
 
 
+def _resolve_espeak_voice(request: SynthesizeRequest) -> str:
+    if request.language and request.language.strip():
+        return request.language.strip()
+    cfg = request.audio_config or {}
+    engine = cfg.get("engine") if isinstance(cfg, dict) else None
+    if isinstance(engine, dict):
+        lang = engine.get("language")
+        if isinstance(lang, str) and lang.strip():
+            return lang.strip()
+    return os.getenv("ESPEAK_VOICE", "ru")
+
+
 def _espeak_synthesize(request: SynthesizeRequest) -> Response:
     if not _ESPEAK_BIN:
         raise HTTPException(status_code=503, detail="espeak backend is not available")
 
-    voice = os.getenv("ESPEAK_VOICE", "ru")
+    voice = _resolve_espeak_voice(request)
     # небольшая подстройка темпа из emotion.tempo
     base_speed = int(os.getenv("ESPEAK_SPEED", "165"))
     speed = max(80, min(260, int(base_speed * max(0.6, min(request.emotion.tempo, 1.6)))))
@@ -159,7 +174,7 @@ def synthesize(request: SynthesizeRequest) -> Response:
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        speaker_wav = _speaker_sample_for(request.speaker)
+        speaker_wav = request.voice_sample or _speaker_sample_for(request.speaker)
         kwargs = {
             "text": request.text,
             "file_path": str(tmp_path),
@@ -167,7 +182,7 @@ def synthesize(request: SynthesizeRequest) -> Response:
         }
         if speaker_wav:
             kwargs["speaker_wav"] = speaker_wav
-            kwargs["language"] = os.getenv("TTS_LANGUAGE", "ru")
+            kwargs["language"] = request.language or os.getenv("TTS_LANGUAGE", "ru")
 
         _COQUI.tts_to_file(**kwargs)
 

@@ -58,6 +58,28 @@ class MockSynthesizer(BaseSynthesizer):
 
 
 class ExternalHTTPSynthesizer(BaseSynthesizer):
+    @staticmethod
+    def _resolve_language(request: TTSRequest) -> str | None:
+        if request.language:
+            return request.language
+        cfg = request.audio_config or {}
+        engine = cfg.get("engine") if isinstance(cfg, dict) else None
+        if isinstance(engine, dict):
+            lang = engine.get("language")
+            if isinstance(lang, str) and lang.strip():
+                return lang.strip()
+        return None
+
+    @staticmethod
+    def _resolve_voice_sample(request: TTSRequest) -> str | None:
+        cfg = request.audio_config or {}
+        voices = cfg.get("voices") if isinstance(cfg, dict) else None
+        if isinstance(voices, dict):
+            sample = voices.get((request.speaker or "").lower()) or voices.get("narrator")
+            if isinstance(sample, str) and sample.strip():
+                return sample.strip()
+        return None
+
     """Adapter for standalone TTS service with HTTP API."""
 
     def __init__(self, base_url: str, timeout_sec: int = 60):
@@ -71,6 +93,9 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
                 "text": request.text,
                 "speaker": request.speaker,
                 "emotion": request.emotion.model_dump(),
+                "language": self._resolve_language(request),
+                "voice_sample": self._resolve_voice_sample(request),
+                "audio_config": request.audio_config,
             },
             timeout=self.timeout_sec,
         )

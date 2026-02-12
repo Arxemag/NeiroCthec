@@ -27,6 +27,7 @@ class TTSRequest(BaseModel):
     speaker: str = "narrator"
     emotion: EmotionPayload = Field(default_factory=EmotionPayload)
     audio_config: dict | None = None
+    language: str | None = None
 
 
 class TTSResponse(BaseModel):
