@@ -9,7 +9,7 @@ RUN npm ci --include=dev
 
 COPY . .
 
-RUN npm exec -w apps/api prisma generate -- --schema=prisma/schema.prisma
+RUN npm run -w apps/api prisma:generate
 RUN npm run -w apps/api build
 
 EXPOSE 4000
