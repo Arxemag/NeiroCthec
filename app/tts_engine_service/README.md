@@ -18,15 +18,23 @@
 Возвращает `audio/wav` и заголовок `x-duration-ms`.
 
 ## Бэкенды синтеза
-- Если установлен `TTS` (Coqui), сервис использует реальный синтезатор и voice samples из `storage/voices/{narrator,male,female}.wav`.
-- Если Coqui недоступен, включается mock-tone fallback (для контрактной отладки).
+- `coqui` — основной прод-режим (XTTS/Coqui).
+- `espeak` — деградированный fallback (может давать сильный акцент/низкую разборчивость).
+- `mock` — тестовый тональный синтезатор.
+- `auto` — пытается Coqui; если Coqui не поднялся, по умолчанию возвращает ошибку `503`.
 
-`GET /health` возвращает активный backend в поле `backend` (`coqui` или `mock`).
+`GET /health` возвращает `requested_backend`, `active_backend`, `coqui_ready`, `coqui_error`.
 
+## Важно для XTTS
+- Для `xtts_v2` обязателен `speaker_wav` (образец голоса).
+- Если образец не найден (`voice_sample` в запросе и/или файлы в `TTS_VOICES_ROOT`), сервис вернёт `422`, а не будет синтезировать "чужим" голосом.
 
 ## Переменные окружения
-- `TTS_BACKEND=coqui|espeak|mock|auto` (рекомендуется `auto` (coqui -> espeak -> mock)).
+- `TTS_BACKEND=coqui|espeak|mock|auto` (рекомендуется `coqui`)
 - `TTS_LANGUAGE=ru`
 - `TTS_VOICES_ROOT=/srv/storage/voices`
+- `TTS_ALLOW_DEGRADED_BACKEND=false|true`
+  - `false` (по умолчанию): в `auto` режиме при недоступном Coqui отдаём `503`
+  - `true`: разрешает fallback в `espeak`/`mock`
 
-`/health` показывает `requested_backend`, `active_backend` и `coqui_error` для диагностики.
+`/health` используйте для быстрой проверки, что реально активен именно `coqui`.

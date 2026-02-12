@@ -34,14 +34,14 @@ class SynthesizeRequest(BaseModel):
 _BACKEND = os.getenv("TTS_BACKEND", "auto").strip().lower()  # coqui | espeak | mock | auto
 _COQUI = None
 _COQUI_ERROR: str | None = None
+_COQUI_MODEL_NAME = os.getenv("TTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
 
 if _BACKEND in {"coqui", "auto"}:
     try:
         from TTS.api import TTS  # type: ignore
 
-        model_name = os.getenv("TTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
         use_gpu = os.getenv("TTS_USE_GPU", "false").lower() == "true"
-        _COQUI = TTS(model_name=model_name, progress_bar=False, gpu=use_gpu)
+        _COQUI = TTS(model_name=_COQUI_MODEL_NAME, progress_bar=False, gpu=use_gpu)
     except Exception as exc:
         _COQUI_ERROR = str(exc)
 
@@ -82,6 +82,14 @@ def _resolve_coqui_speaker_wav(request: SynthesizeRequest) -> str | None:
             return str(sample)
 
     return _speaker_sample_for(request.speaker)
+
+
+def _coqui_requires_speaker_wav() -> bool:
+    return "xtts" in (_COQUI_MODEL_NAME or "").lower()
+
+
+def _degraded_backend_allowed() -> bool:
+    return os.getenv("TTS_ALLOW_DEGRADED_BACKEND", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _mock_synthesize(request: SynthesizeRequest) -> Response:
@@ -190,9 +198,18 @@ def synthesize(request: SynthesizeRequest) -> Response:
         if _COQUI is None:
             raise HTTPException(status_code=503, detail=f"Coqui backend is not available: {_COQUI_ERROR}")
     elif _BACKEND == "auto":
-        if _COQUI is None and _ESPEAK_BIN:
-            return _espeak_synthesize(request)
-        if _COQUI is None and not _ESPEAK_BIN:
+        if _COQUI is None:
+            if not _degraded_backend_allowed():
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Coqui backend is not available, degraded fallback is disabled. "
+                        "Set TTS_ALLOW_DEGRADED_BACKEND=true to allow espeak/mock fallback. "
+                        f"Coqui error: {_COQUI_ERROR}"
+                    ),
+                )
+            if _ESPEAK_BIN:
+                return _espeak_synthesize(request)
             return _mock_synthesize(request)
 
     # coqui synthesis path
@@ -209,6 +226,14 @@ def synthesize(request: SynthesizeRequest) -> Response:
         }
         if speaker_wav:
             kwargs["speaker_wav"] = speaker_wav
+        elif _coqui_requires_speaker_wav():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "XTTS requires a reference speaker wav, but none was found. "
+                    "Provide voice_sample or configure TTS_VOICES_ROOT with narrator/male/female wav files."
+                ),
+            )
 
         _COQUI.tts_to_file(**kwargs)
 
