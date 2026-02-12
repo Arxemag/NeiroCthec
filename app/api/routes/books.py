@@ -189,6 +189,8 @@ def download_book_audio(book_id: str, user_id: str = Depends(get_current_user_id
     if not book.final_audio_path or not Path(book.final_audio_path).exists():
         raise HTTPException(status_code=409, detail="Final audio is not ready")
 
-    return FileResponse(path=book.final_audio_path, filename=f"{book.id}.mp3", media_type="audio/mpeg")
+    final_path = Path(book.final_audio_path)
+    media_type = "audio/wav" if final_path.suffix.lower() == ".wav" else "audio/mpeg"
+    return FileResponse(path=book.final_audio_path, filename=f"{book.id}{final_path.suffix}", media_type=media_type)
 
 

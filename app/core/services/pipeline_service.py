@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import wave
 from collections import defaultdict
 from pathlib import Path
 
@@ -172,6 +174,47 @@ def stage4_mark_done(db: Session, line: Line, audio_path: str) -> None:
 # Stage 5 chapter assembly
 # -----------------------------
 
+
+
+def _resolve_audio_source_path(audio_path: str) -> Path:
+    raw = (audio_path or "").strip()
+    if not raw:
+        raise ValueError("empty audio_path")
+
+    local = Path(raw)
+    if local.exists():
+        return local
+
+    uri_prefix = os.getenv("STAGE4_OBJECT_URI_PREFIX", "s3://audio").rstrip("/")
+    object_root = Path(os.getenv("STAGE4_OBJECT_ROOT", "storage/object"))
+
+    if raw.startswith(uri_prefix + "/"):
+        rel = raw[len(uri_prefix) + 1 :]
+        mapped = object_root / rel
+        if mapped.exists():
+            return mapped
+
+    raise FileNotFoundError(f"Audio source does not exist: {audio_path}")
+
+
+def _concat_wavs(input_paths: list[Path], output_path: Path) -> None:
+    if not input_paths:
+        raise ValueError("No wav files to assemble")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with wave.open(str(input_paths[0]), "rb") as first_wav:
+        params = first_wav.getparams()
+        with wave.open(str(output_path), "wb") as out_wav:
+            out_wav.setparams(params)
+            out_wav.writeframes(first_wav.readframes(first_wav.getnframes()))
+
+            for wav_path in input_paths[1:]:
+                with wave.open(str(wav_path), "rb") as in_wav:
+                    if in_wav.getparams()[:3] != params[:3]:
+                        raise ValueError(f"WAV params mismatch for {wav_path}")
+                    out_wav.writeframes(in_wav.readframes(in_wav.getnframes()))
+
 def _extract_chapter_id(line: Line) -> int:
     if line.segments and isinstance(line.segments, list):
         first = line.segments[0] if line.segments else {}
@@ -199,20 +242,21 @@ def try_stage5_assemble(db: Session, book: Book, output_root: Path) -> None:
         by_chapter[_extract_chapter_id(line)].append(line)
 
     chapter_outputs: list[Path] = []
+    final_line_wavs: list[Path] = []
     for chapter_id in sorted(by_chapter):
-        chapter_file = chapters_root / f"chapter_{chapter_id:03d}.mp3"
-        with chapter_file.open("w", encoding="utf-8") as fh:
-            for line in by_chapter[chapter_id]:
-                fh.write(f"{line.idx}:{line.audio_path}\n")
-                line.tts_status = LineStatus.assembled
+        chapter_lines = by_chapter[chapter_id]
+        chapter_inputs = [_resolve_audio_source_path(line.audio_path or "") for line in chapter_lines]
+        chapter_file = chapters_root / f"chapter_{chapter_id:03d}.wav"
+        _concat_wavs(chapter_inputs, chapter_file)
+        for line in chapter_lines:
+            line.tts_status = LineStatus.assembled
         chapter_outputs.append(chapter_file)
+        final_line_wavs.extend(chapter_inputs)
 
-    final_index = book_root / f"{book.id}.mp3"
-    with final_index.open("w", encoding="utf-8") as fh:
-        for path in chapter_outputs:
-            fh.write(f"{path.name}\n")
+    final_audio = book_root / f"{book.id}.wav"
+    _concat_wavs(final_line_wavs, final_audio)
 
-    book.final_audio_path = str(final_index)
+    book.final_audio_path = str(final_audio)
     book.status = BookStatus.completed
 
 
