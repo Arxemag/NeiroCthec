@@ -183,6 +183,7 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
                     f"{self.base_url}/synthesize",
                     json=payload,
                     timeout=self.timeout_sec,
+                    stream=True,
                 )
                 response.raise_for_status()
                 break
@@ -226,5 +227,8 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
 
         duration_ms = int(response.headers.get("x-duration-ms", "0") or "0")
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(response.content)
+        with output_path.open("wb") as fh:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    fh.write(chunk)
         return duration_ms

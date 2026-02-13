@@ -32,6 +32,26 @@ def _prepare_coqui_env() -> None:
         os.environ.setdefault("COQUI_TOS_AGREED", "1")
         os.environ.setdefault("TTS_HOME", os.getenv("TTS_HOME", "/srv/storage/tts_cache"))
 
+
+def _patch_torch_load_for_coqui() -> None:
+    """PyTorch 2.6+ compatibility: ensure Coqui checkpoints load with weights_only=False by default."""
+    try:
+        import torch  # type: ignore
+    except Exception:
+        return
+
+    original_load = getattr(torch, "load", None)
+    if original_load is None or getattr(torch.load, "__coqui_patched__", False):
+        return
+
+    def _patched_load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original_load(*args, **kwargs)
+
+    _patched_load.__coqui_patched__ = True  # type: ignore[attr-defined]
+    torch.load = _patched_load  # type: ignore[assignment]
+
+
 def _require_gpu() -> bool:
     return os.getenv("TTS_REQUIRE_GPU", "false").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -130,6 +150,7 @@ def _init_coqui() -> None:
         return
 
     _prepare_coqui_env()
+    _patch_torch_load_for_coqui()
     logger.info("coqui env prepared: tos_auto_accept=%s COQUI_TOS_AGREED=%s TTS_HOME=%s", _coqui_tos_auto_accept(), os.getenv("COQUI_TOS_AGREED"), os.getenv("TTS_HOME"))
     try:
         from TTS.api import TTS  # type: ignore
@@ -240,7 +261,7 @@ def _resolve_xtts_params(request: SynthesizeRequest) -> dict:
 
     out: dict = {}
 
-    def _num(name: str, min_v: float | None = None, max_v: float | None = None):
+    def _num(name: str, min_v: float | None = None, max_v: float | None = None, as_int: bool = False):
         raw = xtts.get(name)
         if isinstance(raw, (int, float)):
             value = float(raw)
@@ -248,10 +269,10 @@ def _resolve_xtts_params(request: SynthesizeRequest) -> dict:
                 value = max(min_v, value)
             if max_v is not None:
                 value = min(max_v, value)
-            out[name] = value
+            out[name] = int(round(value)) if as_int else value
 
     _num("temperature", 0.05, 2.0)
-    _num("top_k", 1, 400)
+    _num("top_k", 1, 400, as_int=True)
     _num("top_p", 0.1, 1.0)
     _num("repetition_penalty", 1.0, 10.0)
     return out
@@ -285,6 +306,15 @@ def _resolve_coqui_speaker_wav(request: SynthesizeRequest) -> str | None:
     resolved = _resolve_shared_voice_sample_path(request.voice_sample)
     if resolved:
         return resolved
+
+    cfg = request.audio_config or {}
+    voices = cfg.get("voices") if isinstance(cfg, dict) else None
+    if isinstance(voices, dict):
+        speaker_key = _normalize_speaker_label(request.speaker)
+        sample = voices.get(speaker_key) or voices.get("narrator")
+        resolved_cfg = _resolve_shared_voice_sample_path(sample if isinstance(sample, str) else None)
+        if resolved_cfg:
+            return resolved_cfg
 
     return _speaker_sample_for(_normalize_speaker_label(request.speaker))
 

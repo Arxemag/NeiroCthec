@@ -86,3 +86,9 @@
 
 ### Совместимость зависимостей Coqui
 Для `TTS==0.22.0` в сервисе зафиксирован `transformers==4.36.2`. Это предотвращает ошибки импорта XTTS вроде `cannot import name BeamSearchScorer`.
+
+
+### Дополнительные fixes стабильности
+- Для XTTS параметр `audio_config.xtts.top_k` в сервисе приводится к `int` перед вызовом Coqui/transformers.
+- Для Coqui в runtime включен patch `torch.load(..., weights_only=False)` по умолчанию (совместимость с PyTorch 2.6+).
+- Разрешение `speaker_wav` проверяет также `audio_config.voices[<speaker>]` и `audio_config.voices.narrator`.

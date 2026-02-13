@@ -6,3 +6,5 @@ TTS==0.22.0
 
 # Keep in sync with TTS 0.22 compatibility (XTTS imports BeamSearchScorer)
 transformers==4.36.2
+torchaudio==2.2.2
+torchcodec
