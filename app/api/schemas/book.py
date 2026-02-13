@@ -47,6 +47,7 @@ class TTSLeaseResponse(BaseModel):
     voice: str
     emotion: dict
     audio_config: dict | None = None
+    language: str | None = None
 
 
 class AudioConfigResponse(BaseModel):

@@ -57,8 +57,9 @@ def process_next_task():
     task = lease.json()
 
     audio_config = task.get("audio_config")
-    language = None
-    if isinstance(audio_config, dict):
+    language_raw = task.get("language")
+    language = language_raw.strip() if isinstance(language_raw, str) and language_raw.strip() else None
+    if language is None and isinstance(audio_config, dict):
         engine = audio_config.get("engine")
         if isinstance(engine, dict):
             lang = engine.get("language")

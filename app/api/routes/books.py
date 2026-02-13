@@ -129,7 +129,8 @@ def upsert_audio_config(
     global_config, _ = _load_global_audio_config()
     row = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == user_id))
     if row:
-        row.config = payload.config
+        # Partial update semantics: keep previous user overrides and patch only provided keys.
+        row.config = _merge_audio_config(row.config if isinstance(row.config, dict) else {}, payload.config)
     else:
         row = UserAudioConfig(user_id=user_id, config=payload.config)
         db.add(row)

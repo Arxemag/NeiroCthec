@@ -59,6 +59,11 @@ def _effective_audio_config(user_config: dict | None) -> dict:
     return _merge_audio_config(_load_global_audio_config(), user_config)
 
 
+def _effective_audio_config_for_user(db: Session, user_id: str) -> dict:
+    user_audio = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == user_id))
+    return _effective_audio_config(user_audio.config if user_audio else None)
+
+
 def _extract_language(audio_config: dict) -> str | None:
     """Извлекает язык из audio_config."""
     if not isinstance(audio_config, dict):
@@ -83,7 +88,7 @@ def tts_next(db: Session = Depends(get_db)):
     db.refresh(task)
 
     payload = task.payload
-    user_audio = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == payload["user_id"]))
+    effective_audio_config = _effective_audio_config_for_user(db, payload["user_id"])
     return TTSLeaseResponse(
         task_id=task.id,
         line_id=payload["line_id"],
@@ -92,7 +97,8 @@ def tts_next(db: Session = Depends(get_db)):
         text=payload["text"],
         voice=payload.get("voice", "narrator"),
         emotion=payload.get("emotion") or {},
-        audio_config=_effective_audio_config(user_audio.config if user_audio else None),
+        audio_config=effective_audio_config,
+        language=_extract_language(effective_audio_config),
     )
 
 
@@ -128,9 +134,6 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
 
     processed = 0
     stopped = False
-    user_audio = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == book.user_id))
-    effective_audio_config = _effective_audio_config(user_audio.config if user_audio else None)
-    language = _extract_language(effective_audio_config)
     for _ in range(max(payload.max_tasks, 1)):
         if book.id in STOP_STAGE4_BOOKS:
             STOP_STAGE4_BOOKS.discard(book.id)
@@ -147,6 +150,8 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
             break
 
         payload_row = task.payload
+        effective_audio_config = _effective_audio_config_for_user(db, payload_row["user_id"])
+        language = _extract_language(effective_audio_config)
         task.status = TaskStatus.processing
         db.commit()
         db.refresh(task)
