@@ -3,3 +3,6 @@ uvicorn==0.30.1
 pydantic==2.8.2
 # Optional real voice backend (if install succeeds)
 TTS==0.22.0
+
+# Keep in sync with TTS 0.22 compatibility (XTTS imports BeamSearchScorer)
+transformers==4.36.2
