@@ -33,7 +33,8 @@
 ## Переменные окружения
 - `TTS_BACKEND=coqui|espeak|mock|auto` (для production качества рекомендуется `coqui`)
 - `TTS_USE_GPU=true|false` — попросить Coqui использовать GPU
-- `TTS_REQUIRE_GPU=true|false` — fail-fast: если CUDA недоступна, `/synthesize` вернёт `503`
+- `TTS_REQUIRE_GPU=true|false` — fail-fast: если CUDA недоступна или Coqui не смог подняться на GPU, `/synthesize` вернёт `503`
+- `TTS_COQUI_GPU_FALLBACK_CPU=true|false` — если инициализация Coqui на GPU упала, попробовать подняться на CPU
 - `TTS_LANGUAGE=ru`
 - `TTS_VOICES_ROOT=/srv/storage/voices`
 - `TTS_ALLOW_DEGRADED_BACKEND=false|true`
@@ -56,8 +57,9 @@
 ### Рекомендуемый production-профиль качества
 - `TTS_BACKEND=coqui`
 - `TTS_USE_GPU=true`
-- `TTS_REQUIRE_GPU=true`
+- `TTS_REQUIRE_GPU=false`
+- `TTS_COQUI_GPU_FALLBACK_CPU=true`
 - `TTS_ALLOW_DEGRADED_BACKEND=false`
 - `STAGE4_ENFORCE_TTS_BACKEND=true`
 
-Такой профиль запрещает тихие деградации в `espeak/mock` и не даёт продолжать синтез на CPU, если ожидался GPU.
+Такой профиль запрещает тихие деградации в `espeak/mock`; при проблемах инициализации GPU Coqui сохранит качество движка через CPU fallback вместо аварийного 503.

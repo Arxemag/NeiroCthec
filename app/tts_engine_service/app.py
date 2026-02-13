@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import wave
 from io import BytesIO
+from typing import Any
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Response
@@ -41,6 +42,7 @@ def _runtime_diagnostics() -> dict:
     return {
         "backend_requested": _BACKEND,
         "coqui_model": _COQUI_MODEL_NAME,
+        "coqui_active_device": _COQUI_ACTIVE_DEVICE,
         "tts_use_gpu_env": use_gpu_env,
         "torch_cuda_available": cuda_available,
         "torch_cuda_device": cuda_device,
@@ -49,6 +51,7 @@ def _runtime_diagnostics() -> dict:
         "shared_storage_root": os.getenv("SHARED_STORAGE_ROOT", "/srv/storage"),
         "default_language": os.getenv("TTS_LANGUAGE", "ru"),
         "tts_require_gpu": _require_gpu(),
+        "tts_coqui_gpu_fallback_cpu": _coqui_gpu_fallback_to_cpu(),
     }
 
 class EmotionPayload(BaseModel):
@@ -67,18 +70,58 @@ class SynthesizeRequest(BaseModel):
 
 
 _BACKEND = os.getenv("TTS_BACKEND", "auto").strip().lower()  # coqui | espeak | mock | auto
-_COQUI = None
+_COQUI: Any = None
 _COQUI_ERROR: str | None = None
+_COQUI_ACTIVE_DEVICE: str | None = None
 _COQUI_MODEL_NAME = os.getenv("TTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
 
-if _BACKEND in {"coqui", "auto"}:
+
+def _coqui_gpu_fallback_to_cpu() -> bool:
+    return os.getenv("TTS_COQUI_GPU_FALLBACK_CPU", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _init_coqui() -> None:
+    global _COQUI, _COQUI_ERROR, _COQUI_ACTIVE_DEVICE
+    if _BACKEND not in {"coqui", "auto"}:
+        return
+
     try:
         from TTS.api import TTS  # type: ignore
-
-        use_gpu = os.getenv("TTS_USE_GPU", "false").lower() == "true"
-        _COQUI = TTS(model_name=_COQUI_MODEL_NAME, progress_bar=False, gpu=use_gpu)
     except Exception as exc:
+        _COQUI = None
+        _COQUI_ERROR = f"Failed to import TTS.api: {exc}"
+        _COQUI_ACTIVE_DEVICE = None
+        logger.exception("coqui import failed")
+        return
+
+    use_gpu = os.getenv("TTS_USE_GPU", "false").lower() == "true"
+    try:
+        _COQUI = TTS(model_name=_COQUI_MODEL_NAME, progress_bar=False, gpu=use_gpu)
+        _COQUI_ERROR = None
+        _COQUI_ACTIVE_DEVICE = "gpu" if use_gpu else "cpu"
+        logger.info("coqui init success: model=%s device=%s", _COQUI_MODEL_NAME, _COQUI_ACTIVE_DEVICE)
+        return
+    except Exception as exc:
+        _COQUI = None
         _COQUI_ERROR = str(exc)
+        _COQUI_ACTIVE_DEVICE = None
+        logger.exception("coqui init failed with gpu=%s", use_gpu)
+
+    if use_gpu and _coqui_gpu_fallback_to_cpu():
+        try:
+            _COQUI = TTS(model_name=_COQUI_MODEL_NAME, progress_bar=False, gpu=False)
+            _COQUI_ERROR = None
+            _COQUI_ACTIVE_DEVICE = "cpu"
+            logger.warning("coqui initialized on CPU fallback after GPU init failure")
+            return
+        except Exception as exc:
+            _COQUI = None
+            _COQUI_ERROR = f"GPU init failed and CPU fallback failed: {exc}"
+            _COQUI_ACTIVE_DEVICE = None
+            logger.exception("coqui CPU fallback init failed")
+
+
+_init_coqui()
 
 _ESPEAK_BIN = shutil.which("espeak") or shutil.which("espeak-ng")
 
@@ -322,8 +365,14 @@ def synthesize(request: SynthesizeRequest) -> Response:
 
     if _BACKEND == "coqui":
         if _COQUI is None:
+            _init_coqui()
+        if _COQUI is None:
             raise HTTPException(status_code=503, detail=f"Coqui backend is not available: {_COQUI_ERROR}")
+        if _require_gpu() and _COQUI_ACTIVE_DEVICE != "gpu":
+            raise HTTPException(status_code=503, detail="GPU is required for Coqui but active device is not GPU")
     elif _BACKEND == "auto":
+        if _COQUI is None:
+            _init_coqui()
         if _COQUI is None:
             if not _degraded_backend_allowed():
                 raise HTTPException(

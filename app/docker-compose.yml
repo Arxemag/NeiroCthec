@@ -50,7 +50,8 @@ services:
       - TTS_BACKEND=coqui
       - TTS_ALLOW_DEGRADED_BACKEND=false
       - TTS_USE_GPU=true
-      - TTS_REQUIRE_GPU=true
+      - TTS_COQUI_GPU_FALLBACK_CPU=true
+      - TTS_REQUIRE_GPU=false
       - TTS_LANGUAGE=ru
       - TTS_VOICES_ROOT=/srv/storage/voices
     volumes:
