@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from db.models import Book, Line, LineStatus, TTSTask, TaskStatus, UserAudioConf
 from db.session import get_db
 
 router = APIRouter()
+logger = logging.getLogger("api.internal")
 OUTPUT_ROOT = Path("storage/audio")
 STAGE4_TTS_URL = os.getenv("STAGE4_TTS_URL", "http://stage4-tts:8010")
 STOP_STAGE4_BOOKS: set[str] = set()
@@ -89,6 +91,8 @@ def tts_next(db: Session = Depends(get_db)):
 
     payload = task.payload
     effective_audio_config = _effective_audio_config_for_user(db, payload["user_id"])
+    language = _extract_language(effective_audio_config)
+    logger.info("tts-next lease task_id=%s user_id=%s line_id=%s speaker=%s language=%s audio_config_keys=%s", task.id, payload["user_id"], payload["line_id"], payload.get("voice", "narrator"), language, sorted(effective_audio_config.keys()))
     return TTSLeaseResponse(
         task_id=task.id,
         line_id=payload["line_id"],
@@ -98,7 +102,7 @@ def tts_next(db: Session = Depends(get_db)):
         voice=payload.get("voice", "narrator"),
         emotion=payload.get("emotion") or {},
         audio_config=effective_audio_config,
-        language=_extract_language(effective_audio_config),
+        language=language,
     )
 
 
@@ -152,6 +156,7 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
         payload_row = task.payload
         effective_audio_config = _effective_audio_config_for_user(db, payload_row["user_id"])
         language = _extract_language(effective_audio_config)
+        logger.info("process-book-stage4 task_id=%s line_id=%s speaker=%s language=%s audio_config_keys=%s", task.id, payload_row["line_id"], payload_row.get("voice", "narrator"), language, sorted(effective_audio_config.keys()))
         task.status = TaskStatus.processing
         db.commit()
         db.refresh(task)

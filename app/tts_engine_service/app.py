@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import os
 import shutil
@@ -13,8 +14,37 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Standalone TTS Engine")
 
+app = FastAPI(title="Standalone TTS Engine")
+logging.basicConfig(level=os.getenv("TTS_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("tts-engine")
+
+
+def _runtime_diagnostics() -> dict:
+    use_gpu_env = os.getenv("TTS_USE_GPU", "false")
+    cuda_available = None
+    cuda_device = None
+    try:
+        import torch  # type: ignore
+
+        cuda_available = bool(torch.cuda.is_available())
+        if cuda_available:
+            cuda_device = torch.cuda.get_device_name(0)
+    except Exception:
+        cuda_available = None
+        cuda_device = None
+
+    return {
+        "backend_requested": _BACKEND,
+        "coqui_model": _COQUI_MODEL_NAME,
+        "tts_use_gpu_env": use_gpu_env,
+        "torch_cuda_available": cuda_available,
+        "torch_cuda_device": cuda_device,
+        "espeak_bin": _ESPEAK_BIN,
+        "voices_root": os.getenv("TTS_VOICES_ROOT", "storage/voices"),
+        "shared_storage_root": os.getenv("SHARED_STORAGE_ROOT", "/srv/storage"),
+        "default_language": os.getenv("TTS_LANGUAGE", "ru"),
+    }
 
 class EmotionPayload(BaseModel):
     energy: float = 1.0
@@ -257,7 +287,7 @@ def _espeak_synthesize(request: SynthesizeRequest) -> Response:
 @app.get("/health")
 def health() -> dict:
     active = "coqui" if _COQUI is not None else "espeak" if _ESPEAK_BIN else "mock"
-    return {
+    payload = {
         "status": "ok",
         "requested_backend": _BACKEND,
         "active_backend": active,
@@ -267,11 +297,15 @@ def health() -> dict:
         "default_language": os.getenv("TTS_LANGUAGE", "ru"),
         "voices_root": os.getenv("TTS_VOICES_ROOT", "storage/voices"),
         "espeak_ready": _ESPEAK_BIN is not None,
+        "runtime": _runtime_diagnostics(),
     }
+    logger.info("health: %s", payload)
+    return payload
 
 
 @app.post("/synthesize")
 def synthesize(request: SynthesizeRequest) -> Response:
+    logger.info("synthesize request: speaker=%s language=%s voice_sample=%s audio_config_keys=%s runtime=%s", request.speaker, request.language, request.voice_sample, sorted((request.audio_config or {}).keys()) if isinstance(request.audio_config, dict) else [], _runtime_diagnostics())
     if _BACKEND == "mock":
         return _mock_synthesize(request)
 
@@ -302,6 +336,7 @@ def synthesize(request: SynthesizeRequest) -> Response:
     try:
         speaker_wav = _resolve_coqui_speaker_wav(request)
         language = _resolve_coqui_language(request)
+        logger.info("coqui resolved params: language=%s speaker=%s speaker_wav=%s", language, _normalize_speaker_label(request.speaker), speaker_wav)
         kwargs = {
             "text": request.text,
             "file_path": str(tmp_path),
@@ -329,7 +364,7 @@ def synthesize(request: SynthesizeRequest) -> Response:
             duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
         speaker_label = _normalize_speaker_label(request.speaker)
         speaker_marker = Path(speaker_wav).name if speaker_wav else "none"
-        return Response(
+        response = Response(
             content=content,
             media_type="audio/wav",
             headers={
@@ -340,6 +375,8 @@ def synthesize(request: SynthesizeRequest) -> Response:
                 "x-tts-speaker-wav": speaker_marker,
             },
         )
+        logger.info("coqui response: duration_ms=%s backend=coqui language=%s speaker=%s speaker_wav=%s", duration_ms, language, speaker_label, speaker_marker)
+        return response
     finally:
         if tmp_path.exists():
             tmp_path.unlink()

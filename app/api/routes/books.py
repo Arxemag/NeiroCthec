@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -23,6 +24,7 @@ from db.models import Book, BookStatus, Line, LineStatus, UserAudioConfig
 from db.session import get_db
 
 router = APIRouter()
+logger = logging.getLogger("api.books")
 
 STORAGE_ROOT = Path("storage")
 UPLOAD_ROOT = STORAGE_ROOT / "uploads"
@@ -131,9 +133,11 @@ def upsert_audio_config(
     if row:
         # Partial update semantics: keep previous user overrides and patch only provided keys.
         row.config = _merge_audio_config(row.config if isinstance(row.config, dict) else {}, payload.config)
+        logger.info("audio settings update user_id=%s mode=merge keys=%s", user_id, sorted(payload.config.keys()))
     else:
         row = UserAudioConfig(user_id=user_id, config=payload.config)
         db.add(row)
+        logger.info("audio settings update user_id=%s mode=create keys=%s", user_id, sorted(payload.config.keys()))
 
     db.commit()
     db.refresh(row)

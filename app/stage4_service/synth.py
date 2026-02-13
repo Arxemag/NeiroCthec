@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 import os
 import math
 import struct
@@ -8,6 +9,8 @@ from abc import ABC, abstractmethod
 import requests
 
 from stage4_service.schemas import TTSRequest
+
+logger = logging.getLogger("stage4")
 
 
 class BaseSynthesizer(ABC):
@@ -31,6 +34,15 @@ class MockSynthesizer(BaseSynthesizer):
         speaker = _normalize_speaker_label(request.speaker)
         base_freq = 180 if speaker == "male" else 230 if speaker == "female" else 200
         freq = base_freq * (2 ** pitch_factor)
+
+        logger.info(
+            "mock synth config: speaker=%s base_freq=%s final_freq=%.2f duration_sec=%.3f sample_rate=%s",
+            speaker,
+            base_freq,
+            freq,
+            duration_sec,
+            self.sample_rate,
+        )
 
         fade_len = max(1, int(0.01 * self.sample_rate))
 
@@ -72,8 +84,6 @@ def _normalize_speaker_label(speaker: str | None) -> str:
     if normalized in {"male", "female", "narrator"}:
         return normalized
     return "narrator"
-
-
 
 
 def _resolve_shared_storage_path(path_value: str | None) -> str | None:
@@ -140,14 +150,27 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
         self.timeout_sec = timeout_sec
 
     def synthesize(self, request: TTSRequest, output_path: Path) -> int:
+        resolved_language = self._resolve_language(request)
+        resolved_voice_sample = self._resolve_voice_sample(request)
+        speaker = _normalize_speaker_label(request.speaker)
+
+        logger.info(
+            "stage4->tts-engine request: speaker=%s language=%s voice_sample=%s base_url=%s timeout=%s",
+            speaker,
+            resolved_language,
+            resolved_voice_sample,
+            self.base_url,
+            self.timeout_sec,
+        )
+
         response = requests.post(
             f"{self.base_url}/synthesize",
             json={
                 "text": request.text,
-                "speaker": _normalize_speaker_label(request.speaker),
+                "speaker": speaker,
                 "emotion": request.emotion.model_dump(),
-                "language": self._resolve_language(request),
-                "voice_sample": self._resolve_voice_sample(request),
+                "language": resolved_language,
+                "voice_sample": resolved_voice_sample,
                 "audio_config": request.audio_config,
             },
             timeout=self.timeout_sec,
@@ -156,6 +179,17 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
 
         reported_backend = (response.headers.get("x-tts-backend", "") or "").strip().lower()
         expected_backend = _required_tts_backend()
+
+        logger.info(
+            "tts-engine response: status=%s backend=%s duration_ms=%s tts_language=%s tts_speaker=%s tts_speaker_wav=%s",
+            response.status_code,
+            reported_backend,
+            response.headers.get("x-duration-ms"),
+            response.headers.get("x-tts-language"),
+            response.headers.get("x-tts-speaker"),
+            response.headers.get("x-tts-speaker-wav"),
+        )
+
         if _is_backend_enforced() and expected_backend and reported_backend and reported_backend != expected_backend:
             raise RuntimeError(
                 f"Unexpected TTS backend: expected '{expected_backend}', got '{reported_backend}'. "
