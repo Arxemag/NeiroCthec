@@ -56,6 +56,15 @@ def process_next_task():
     lease.raise_for_status()
     task = lease.json()
 
+    audio_config = task.get("audio_config")
+    language = None
+    if isinstance(audio_config, dict):
+        engine = audio_config.get("engine")
+        if isinstance(engine, dict):
+            lang = engine.get("language")
+            if isinstance(lang, str) and lang.strip():
+                language = lang.strip()
+
     req = TTSRequest(
         task_id=task["task_id"],
         user_id=task["user_id"],
@@ -64,7 +73,8 @@ def process_next_task():
         text=task["text"],
         speaker=task["voice"],
         emotion=task["emotion"],
-        audio_config=task.get("audio_config"),
+        audio_config=audio_config,
+        language=language,
     )
 
     result = tts(req)

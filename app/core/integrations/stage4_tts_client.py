@@ -21,7 +21,15 @@ class Stage4TTSClient:
     def __init__(self, config: Stage4ClientConfig | None = None):
         self.config = config or Stage4ClientConfig()
 
-    def synthesize_line(self, user_id: str, book_id: str, line: Line, speaker: str = "narrator") -> dict:
+    def synthesize_line(
+        self,
+        user_id: str,
+        book_id: str,
+        line: Line,
+        speaker: str = "narrator",
+        audio_config: dict | None = None,
+        language: str | None = None,
+    ) -> dict:
         payload = {
             "task_id": str(uuid.uuid4()),
             "user_id": str(user_id),
@@ -37,6 +45,10 @@ class Stage4TTSClient:
                 "pause_after": int(getattr(getattr(line, "emotion", None), "pause_after", 0)),
             },
         }
+        if audio_config is not None:
+            payload["audio_config"] = audio_config
+        if language is not None:
+            payload["language"] = language
 
         response = requests.post(
             f"{self.config.base_url}/tts",

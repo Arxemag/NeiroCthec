@@ -58,6 +58,20 @@ def _merge_audio_config(base: dict, override: dict | None) -> dict:
 def _effective_audio_config(user_config: dict | None) -> dict:
     return _merge_audio_config(_load_global_audio_config(), user_config)
 
+
+def _extract_language(audio_config: dict) -> str | None:
+    """Извлекает язык из audio_config."""
+    if not isinstance(audio_config, dict):
+        return None
+
+    engine = audio_config.get("engine")
+    if isinstance(engine, dict):
+        lang = engine.get("language")
+        if isinstance(lang, str) and lang.strip():
+            return lang.strip()
+    return None
+
+
 @router.post("/tts-next", response_model=TTSLeaseResponse)
 def tts_next(db: Session = Depends(get_db)):
     task = db.scalar(select(TTSTask).where(TTSTask.status == TaskStatus.pending).order_by(TTSTask.created_at.asc()))
@@ -116,6 +130,7 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
     stopped = False
     user_audio = db.scalar(select(UserAudioConfig).where(UserAudioConfig.user_id == book.user_id))
     effective_audio_config = _effective_audio_config(user_audio.config if user_audio else None)
+    language = _extract_language(effective_audio_config)
     for _ in range(max(payload.max_tasks, 1)):
         if book.id in STOP_STAGE4_BOOKS:
             STOP_STAGE4_BOOKS.discard(book.id)
@@ -148,6 +163,7 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
                     "speaker": payload_row.get("voice", "narrator"),
                     "emotion": payload_row.get("emotion") or {},
                     "audio_config": effective_audio_config,
+                    "language": language,
                 },
                 timeout=120,
             )
