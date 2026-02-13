@@ -79,6 +79,20 @@ def _extract_language(audio_config: dict) -> str | None:
     return None
 
 
+def _is_transient_stage4_error(error: str) -> bool:
+    lowered = (error or "").lower()
+    markers = (
+        "connection refused",
+        "max retries exceeded",
+        "failed to establish a new connection",
+        "timed out",
+        "temporarily unavailable",
+        "service unavailable",
+        "tts-engine is unavailable",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 @router.post("/tts-next", response_model=TTSLeaseResponse)
 def tts_next(db: Session = Depends(get_db)):
     task = db.scalar(select(TTSTask).where(TTSTask.status == TaskStatus.pending).order_by(TTSTask.created_at.asc()))
@@ -180,11 +194,23 @@ def process_book_stage4(payload: ProcessBookStage4Payload, db: Session = Depends
             response.raise_for_status()
             tts_result = response.json()
         except Exception as exc:
+            err_text = str(exc)
+            if _is_transient_stage4_error(err_text):
+                logger.warning("transient stage4 call failure for task_id=%s: %s; returning task to pending", task.id, err_text)
+                task.status = TaskStatus.pending
+                db.commit()
+                break
             task.status = TaskStatus.error
             db.commit()
             raise HTTPException(status_code=502, detail=f"Stage4 call failed: {exc}") from exc
 
         if tts_result.get("status") != "DONE":
+            error_msg = str(tts_result.get("error") or tts_result)
+            if _is_transient_stage4_error(error_msg):
+                logger.warning("transient stage4 non-DONE for task_id=%s: %s; returning task to pending", task.id, error_msg)
+                task.status = TaskStatus.pending
+                db.commit()
+                break
             task.status = TaskStatus.error
             db.commit()
             raise HTTPException(status_code=502, detail=f"Stage4 returned non-DONE: {tts_result}")
