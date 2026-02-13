@@ -87,13 +87,15 @@ def _gpu_runtime_status() -> tuple[bool, str | None]:
     try:
         import torch  # type: ignore
 
-        if not torch.cuda.is_available():
-            return False, None
-        try:
-            name = torch.cuda.get_device_name(0)
-        except Exception:
-            name = "cuda:0"
-        return True, name
+        if torch.cuda.is_available():
+            try:
+                name = torch.cuda.get_device_name(0)
+            except Exception:
+                name = "cuda:0"
+            return True, name
+        if hasattr(torch, "hip") and getattr(torch.hip, "is_available", lambda: False)():
+            return True, "ROCm: AMD GPU"
+        return False, None
     except Exception:
         return False, None
 
@@ -253,8 +255,8 @@ def _shared_storage_root() -> Path:
     return Path(os.getenv("SHARED_STORAGE_ROOT", "/srv/storage"))
 
 
-def _load_voices_config() -> dict[str, str]:
-    """Load voices from voices.yaml or voices.json in TTS_VOICES_ROOT."""
+def _load_raw_config() -> dict:
+    """Load raw voices config (voices + aliases) from YAML/JSON."""
     root = _voices_root()
     shared = _shared_storage_root()
     candidates = [
@@ -275,14 +277,41 @@ def _load_voices_config() -> dict[str, str]:
                 import json
                 data = json.loads(content)
             if isinstance(data, dict):
-                out = {}
-                for k, v in data.items():
-                    if isinstance(k, str) and isinstance(v, str) and v.strip():
-                        out[k.strip().lower()] = v.strip()
-                return out
+                return data
         except Exception as e:
             logger.warning("Failed to load voices config %s: %s", path, e)
     return {}
+
+
+def _load_voices_config() -> dict[str, str]:
+    """Load voices (id -> path) from voices.yaml, excluding aliases."""
+    data = _load_raw_config()
+    out: dict[str, str] = {}
+    for k, v in data.items():
+        if k.strip().lower() == "aliases":
+            continue
+        if isinstance(k, str) and isinstance(v, str) and v.strip():
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def _load_speaker_aliases() -> dict[str, str]:
+    """Load alias -> main_speaker from voices.yaml aliases. Builtin fallback."""
+    builtin: dict[str, str] = {
+        "famaly": "female", "femaly": "female", "woman": "female", "girl": "female",
+        "man": "male", "boy": "male",
+        "main": "narrator", "default": "narrator", "storyteller": "narrator", "narr": "narrator",
+    }
+    data = _load_raw_config()
+    aliases_cfg = data.get("aliases") if isinstance(data.get("aliases"), dict) else {}
+    for main_speaker, alias_list in aliases_cfg.items():
+        if not isinstance(main_speaker, str) or not main_speaker.strip():
+            continue
+        main = main_speaker.strip().lower()
+        for a in (alias_list if isinstance(alias_list, (list, tuple)) else []):
+            if isinstance(a, str) and a.strip():
+                builtin[a.strip().lower()] = main
+    return builtin
 
 
 def _resolve_voices_root_path(raw: str) -> Path:
@@ -372,10 +401,7 @@ def _list_available_voices() -> list[VoiceInfo]:
 
 def _normalize_speaker_label(speaker: str | None) -> str:
     raw = (speaker or "").strip().lower()
-    aliases = {
-        "famaly": "female", "femaly": "female", "woman": "female", "girl": "female",
-        "man": "male", "boy": "male",
-    }
+    aliases = _load_speaker_aliases()
     return aliases.get(raw, raw)
 
 
@@ -463,15 +489,23 @@ def _resolve_xtts_speed(request: SynthesizeRequest) -> float:
 
 
 def _resolve_xtts_params(request: SynthesizeRequest) -> dict:
+    """XTTS params with sensible defaults for stability."""
     cfg = request.audio_config or {}
     xtts = cfg.get("xtts") if isinstance(cfg, dict) else None
-    if not isinstance(xtts, dict):
-        return {}
+    xtts = xtts if isinstance(xtts, dict) else {}
 
     out: dict = {}
 
-    def _num(name: str, min_v: float | None = None, max_v: float | None = None, as_int: bool = False):
+    def _num(
+        name: str,
+        min_v: float | None = None,
+        max_v: float | None = None,
+        as_int: bool = False,
+        default: float | int | None = None,
+    ):
         raw = xtts.get(name)
+        if not isinstance(raw, (int, float)) and default is not None:
+            raw = default
         if isinstance(raw, (int, float)):
             value = float(raw)
             if min_v is not None:
@@ -480,10 +514,10 @@ def _resolve_xtts_params(request: SynthesizeRequest) -> dict:
                 value = min(max_v, value)
             out[name] = int(round(value)) if as_int else value
 
-    _num("temperature", 0.05, 2.0)
-    _num("top_k", 1, 400, as_int=True)
-    _num("top_p", 0.1, 1.0)
-    _num("repetition_penalty", 1.0, 10.0)
+    _num("temperature", 0.05, 2.0, default=0.7)
+    _num("top_k", 1, 400, as_int=True, default=50)
+    _num("top_p", 0.1, 1.0, default=0.9)
+    _num("repetition_penalty", 1.0, 10.0, default=2.0)
     return out
 
 

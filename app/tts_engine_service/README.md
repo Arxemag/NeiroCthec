@@ -34,7 +34,7 @@
 ## Поддержка GPU (AMD и NVIDIA)
 - **NVIDIA**: установите PyTorch с CUDA (`pip install torch --index-url https://download.pytorch.org/whl/cu121`)
 - **AMD**: установите PyTorch с ROCm (`pip install torch --index-url https://download.pytorch.org/whl/rocm5.6`)
-- ROCm использует тот же API, что и CUDA; `torch.cuda.is_available()` вернёт `True` на обеих платформах
+- ROCm: проверяется через `torch.cuda` (API-совместимо) и fallback на `torch.hip.is_available()`
 - При ошибке инициализации GPU — автоматический fallback на CPU (если `TTS_COQUI_GPU_FALLBACK_CPU=true`)
 - `TTS_DEVICE=auto|cuda|cpu` — принудительный выбор устройства
 - `TTS_REQUIRE_GPU=true` — отдавать 503, если GPU недоступен
@@ -59,6 +59,8 @@
 
 Приоритет: запрос > config > discovered > builtin. Встроенные `narrator`, `male`, `female` можно переопределить.
 
+**Алиасы** в `voices.yaml` — секция `aliases:` позволяет задать синонимы (например, `woman` → `female`). Есть встроенные: famaly→female, man→male, main→narrator и др.
+
 ## Переменные окружения
 - `TTS_BACKEND=coqui|espeak|mock|auto` (рекомендуется `auto`)
 - `TTS_LANGUAGE=ru`
@@ -76,6 +78,7 @@
 Для production качества лучше закрепить `TTS_BACKEND=coqui` и проверить, что Coqui и voice samples корректно доступны.
 
 - Для XTTS учитывается `audio_config.xtts.speed_base` (умножается на `emotion.tempo`, итог clamp 0.5..2.0).
+- Дефолтные XTTS-параметры при отсутствии в config: temperature=0.7, top_k=50, top_p=0.9, repetition_penalty=2.0.
 
 - В ответе `/synthesize` для Coqui добавляются debug-заголовки: `x-tts-language`, `x-tts-speaker`, `x-tts-speaker-wav`.
 - Для XTTS также применяются параметры из `audio_config.xtts`: `temperature`, `top_k`, `top_p`, `repetition_penalty`.
