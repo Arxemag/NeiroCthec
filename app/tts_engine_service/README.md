@@ -69,3 +69,6 @@
 
 ### Важно про ошибку `EOF when reading a line`
 Если видите интерактивный prompt Coqui про лицензию в Docker, включите `TTS_COQUI_TOS_ACCEPTED=true` (или вручную `COQUI_TOS_AGREED=1`). Иначе Coqui попытается вызвать `input()` и упадёт в non-interactive контейнере.
+
+
+Дополнительно, сервис перехватывает интерактивный prompt Coqui и при `TTS_COQUI_TOS_ACCEPTED=true` автоматически отвечает `y`, чтобы избежать `EOFError` в Docker.

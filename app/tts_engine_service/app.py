@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import logging
 import math
 import os
@@ -87,6 +88,31 @@ _COQUI_ACTIVE_DEVICE: str | None = None
 _COQUI_MODEL_NAME = os.getenv("TTS_MODEL_NAME", "tts_models/multilingual/multi-dataset/xtts_v2")
 
 
+
+
+def _build_tts_instance(TTS_cls: Any, model_name: str, use_gpu: bool) -> Any:
+    """Create Coqui TTS instance with non-interactive ToS fallback."""
+    original_input = builtins.input
+
+    def _auto_input(prompt: str = "") -> str:
+        if _coqui_tos_auto_accept():
+            logger.warning("auto-answering Coqui ToS prompt with 'y' for non-interactive runtime")
+            return "y"
+        return original_input(prompt)
+
+    try:
+        builtins.input = _auto_input
+        tts = TTS_cls(model_name=model_name, progress_bar=False, gpu=use_gpu)
+        target_device = "cuda" if use_gpu else "cpu"
+        if hasattr(tts, "to"):
+            try:
+                tts.to(target_device)
+            except Exception:
+                logger.warning("failed to call tts.to(%s); continuing with default device", target_device)
+        return tts
+    finally:
+        builtins.input = original_input
+
 def _coqui_gpu_fallback_to_cpu() -> bool:
     return os.getenv("TTS_COQUI_GPU_FALLBACK_CPU", "true").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -109,7 +135,7 @@ def _init_coqui() -> None:
 
     use_gpu = os.getenv("TTS_USE_GPU", "false").lower() == "true"
     try:
-        _COQUI = TTS(model_name=_COQUI_MODEL_NAME, progress_bar=False, gpu=use_gpu)
+        _COQUI = _build_tts_instance(TTS, _COQUI_MODEL_NAME, use_gpu)
         _COQUI_ERROR = None
         _COQUI_ACTIVE_DEVICE = "gpu" if use_gpu else "cpu"
         logger.info("coqui init success: model=%s device=%s", _COQUI_MODEL_NAME, _COQUI_ACTIVE_DEVICE)
@@ -122,7 +148,7 @@ def _init_coqui() -> None:
 
     if use_gpu and _coqui_gpu_fallback_to_cpu():
         try:
-            _COQUI = TTS(model_name=_COQUI_MODEL_NAME, progress_bar=False, gpu=False)
+            _COQUI = _build_tts_instance(TTS, _COQUI_MODEL_NAME, False)
             _COQUI_ERROR = None
             _COQUI_ACTIVE_DEVICE = "cpu"
             logger.warning("coqui initialized on CPU fallback after GPU init failure")
