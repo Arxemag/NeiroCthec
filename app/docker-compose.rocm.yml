@@ -1,0 +1,21 @@
+# Оверрайд для запуска TTS с AMD GPU (ROCm)
+# Использование: docker-compose -f docker-compose.yml -f docker-compose.rocm.yml up -d
+#
+# Требования: Linux с установленным ROCm, устройства /dev/kfd и /dev/dri
+
+version: '3.8'
+
+services:
+  tts-engine:
+    build:
+      context: .
+      dockerfile: tts_engine_service/Dockerfile.rocm
+    image: tts-engine-rocm
+    environment:
+      - TTS_USE_GPU=true
+      - TTS_DEVICE=auto
+    group_add:
+      - video
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri

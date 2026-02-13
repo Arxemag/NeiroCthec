@@ -30,6 +30,32 @@ DEFAULT_EMOTION = {
 }
 
 
+def _aggregate_emotion_from_segments(serialized_segments: list[dict]) -> dict:
+    """Агрегирует emotion из tts_meta сегментов (TTSDirector) в формат для TTSTask."""
+    emotion = dict(DEFAULT_EMOTION)
+    for seg in serialized_segments:
+        meta = seg.get("tts_meta") or {}
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("volume") == "whisper":
+            emotion["energy"] = 0.6
+        elif meta.get("volume") == "quiet":
+            emotion["energy"] = 0.8
+        elif meta.get("volume") == "loud":
+            emotion["energy"] = 1.3
+        if meta.get("tempo") == "fast":
+            emotion["tempo"] = 1.2
+        elif meta.get("tempo") == "slow":
+            emotion["tempo"] = 0.85
+        if meta.get("emotion") in ("angry", "fear", "tension"):
+            emotion["energy"] = max(emotion.get("energy", 1.0), 1.2)
+        if isinstance(meta.get("pause_before_ms"), (int, float)):
+            emotion["pause_before"] = max(0, int(meta["pause_before_ms"]))
+        if isinstance(meta.get("pause_after_ms"), (int, float)):
+            emotion["pause_after"] = max(0, int(meta["pause_after_ms"]))
+    return emotion
+
+
 # -----------------------------
 # Stage 0-3 orchestration (core)
 # -----------------------------
@@ -105,7 +131,7 @@ def run_stage3(stage2_lines: list) -> list[dict]:
                 "original": line.original,
                 "tts_text": tts_text_line or line.original,
                 "segments": serialized_segments,
-                "emotion": dict(DEFAULT_EMOTION),
+                "emotion": _aggregate_emotion_from_segments(serialized_segments),
                 "tts_status": LineStatus.tts_pending,
             }
         )

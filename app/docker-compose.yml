@@ -39,7 +39,7 @@ services:
       - ./storage:/srv/storage
     depends_on:
       tts-engine:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "8010:8010"
 
@@ -49,10 +49,17 @@ services:
       dockerfile: tts_engine_service/Dockerfile
     environment:
       - TTS_BACKEND=auto
+      - TTS_USE_GPU=true
       - TTS_ALLOW_DEGRADED_BACKEND=true
       - TTS_LANGUAGE=ru
       - TTS_VOICES_ROOT=/srv/storage/voices
       - COQUI_TOS_AGREED=1
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8020/health', timeout=5)"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
     volumes:
       - ./:/srv
       - ./storage:/srv/storage

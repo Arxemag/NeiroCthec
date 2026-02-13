@@ -1,9 +1,10 @@
 # Standalone TTS Engine
 
-Минимальный HTTP-сервис TTS, который можно запускать отдельно от core-пайплайна.
+Качественный HTTP-сервис TTS с поддержкой AMD (ROCm) и NVIDIA (CUDA), стабильной работой и возможностью замены спикеров.
 
 ## API
-- `GET /health`
+- `GET /health` — статус сервиса, backend, GPU, количество голосов
+- `GET /voices` — список доступных голосов (ID, путь, источник)
 - `POST /synthesize`
 
 ### Пример `POST /synthesize`
@@ -30,15 +31,46 @@
 - Метки speaker нормализуются (`famaly`/`femaly` → `female`, неизвестные значения → `narrator`).
 - Если образец не найден (`voice_sample` в запросе и/или файлы в `TTS_VOICES_ROOT`), сервис вернёт `422`, а не будет синтезировать "чужим" голосом.
 
+## Поддержка GPU (AMD и NVIDIA)
+- **NVIDIA**: установите PyTorch с CUDA (`pip install torch --index-url https://download.pytorch.org/whl/cu121`)
+- **AMD**: установите PyTorch с ROCm (`pip install torch --index-url https://download.pytorch.org/whl/rocm5.6`)
+- ROCm использует тот же API, что и CUDA; `torch.cuda.is_available()` вернёт `True` на обеих платформах
+- При ошибке инициализации GPU — автоматический fallback на CPU (если `TTS_COQUI_GPU_FALLBACK_CPU=true`)
+- `TTS_DEVICE=auto|cuda|cpu` — принудительный выбор устройства
+- `TTS_REQUIRE_GPU=true` — отдавать 503, если GPU недоступен
+
+### Проверка использования AMD GPU
+- `GET /health` возвращает `gpu_vendor: "amd"` при работе на AMD Radeon (ROCm)
+- `cuda_device` содержит имя видеокарты (напр. `AMD Radeon RX 6800 XT`)
+- `coqui_device: "cuda"` — Coqui использует GPU
+- При синтезе в логах: `coqui synthesize: device=cuda gpu_vendor=amd gpu_name=...`
+- В ответе `/synthesize` — заголовки `x-tts-device: cuda`, `x-tts-gpu-vendor: amd`
+
+### Docker с AMD ROCm
+- `docker-compose -f docker-compose.yml -f docker-compose.rocm.yml up -d` — TTS на AMD GPU
+- Требуется Linux с ROCm и устройствами `/dev/kfd`, `/dev/dri`
+
+## Замена и расширение спикеров
+Голоса можно менять тремя способами:
+
+1. **Добавить .wav в `TTS_VOICES_ROOT`** — имя файла без расширения станет ID спикера (например, `hero.wav` → `hero`)
+2. **Файл `voices.yaml`** в каталоге голосов — явное сопоставление `id: путь` (см. `voices.yaml.example`)
+3. **В запросе** — `voice_sample` или `audio_config.voices`
+
+Приоритет: запрос > config > discovered > builtin. Встроенные `narrator`, `male`, `female` можно переопределить.
+
 ## Переменные окружения
-- `TTS_BACKEND=coqui|espeak|mock|auto` (для dev/стабильности пайплайна рекомендуется `auto`)
+- `TTS_BACKEND=coqui|espeak|mock|auto` (рекомендуется `auto`)
 - `TTS_LANGUAGE=ru`
 - `TTS_VOICES_ROOT=/srv/storage/voices`
+- `TTS_USE_GPU=true` — использовать GPU, если доступен
 - `TTS_ALLOW_DEGRADED_BACKEND=false|true`
-  - `false` (по умолчанию): в `auto` режиме при недоступном Coqui отдаём `503`
+  - `false`: в `auto` при недоступном Coqui отдаём `503`
   - `true`: разрешает fallback в `espeak`/`mock`
+- `COQUI_TOS_AGREED=1` — принять лицензию Coqui без интерактива
+- `TTS_HOME=/srv/storage/tts_cache` — кэш моделей
 
-`/health` используйте для быстрой проверки, что реально активен именно `coqui`.
+`/health` и `/voices` используйте для проверки backend и списка голосов.
 
 
 Для production качества лучше закрепить `TTS_BACKEND=coqui` и проверить, что Coqui и voice samples корректно доступны.
