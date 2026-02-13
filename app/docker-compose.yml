@@ -32,13 +32,15 @@ services:
       - EXTERNAL_TTS_URL=http://tts-engine:8020
       - STAGE4_ENFORCE_TTS_BACKEND=true
       - STAGE4_EXPECT_TTS_BACKEND=coqui
+      - STAGE4_TTS_ENGINE_RETRIES=8
+      - STAGE4_TTS_ENGINE_RETRY_BACKOFF_SEC=1.5
     command: python3 -m uvicorn stage4_service.app:app --host 0.0.0.0 --port 8010 --reload
     volumes:
       - ./:/srv
       - ./storage:/srv/storage
     depends_on:
       tts-engine:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "8010:8010"
 
@@ -62,6 +64,12 @@ services:
       - ./storage:/srv/storage
     ports:
       - "8020:8020"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
     deploy:
       resources:
         reservations:

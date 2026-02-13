@@ -72,3 +72,10 @@
 
 
 Дополнительно, сервис перехватывает интерактивный prompt Coqui и при `TTS_COQUI_TOS_ACCEPTED=true` автоматически отвечает `y`, чтобы избежать `EOFError` в Docker.
+
+
+### Устойчивость Stage4 -> tts-engine
+- `STAGE4_TTS_ENGINE_RETRIES` — число повторов HTTP-запроса к `/synthesize` при startup race/connection refused.
+- `STAGE4_TTS_ENGINE_RETRY_BACKOFF_SEC` — базовый backoff (линейно растёт по попыткам).
+
+В docker-compose stage4 теперь ждёт `tts-engine` по healthcheck (`depends_on: service_healthy`), что уменьшает 502 на старте.

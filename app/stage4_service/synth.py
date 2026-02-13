@@ -7,6 +7,7 @@ import wave
 from abc import ABC, abstractmethod
 
 import requests
+import time
 
 from stage4_service.schemas import TTSRequest
 
@@ -148,6 +149,8 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
     def __init__(self, base_url: str, timeout_sec: int = 60):
         self.base_url = base_url.rstrip("/")
         self.timeout_sec = timeout_sec
+        self.max_retries = max(int(os.getenv("STAGE4_TTS_ENGINE_RETRIES", "6")), 1)
+        self.retry_backoff_sec = max(float(os.getenv("STAGE4_TTS_ENGINE_RETRY_BACKOFF_SEC", "1.5")), 0.1)
 
     def synthesize(self, request: TTSRequest, output_path: Path) -> int:
         resolved_language = self._resolve_language(request)
@@ -163,19 +166,44 @@ class ExternalHTTPSynthesizer(BaseSynthesizer):
             self.timeout_sec,
         )
 
-        response = requests.post(
-            f"{self.base_url}/synthesize",
-            json={
-                "text": request.text,
-                "speaker": speaker,
-                "emotion": request.emotion.model_dump(),
-                "language": resolved_language,
-                "voice_sample": resolved_voice_sample,
-                "audio_config": request.audio_config,
-            },
-            timeout=self.timeout_sec,
-        )
-        response.raise_for_status()
+        payload = {
+            "text": request.text,
+            "speaker": speaker,
+            "emotion": request.emotion.model_dump(),
+            "language": resolved_language,
+            "voice_sample": resolved_voice_sample,
+            "audio_config": request.audio_config,
+        }
+
+        response = None
+        last_exc: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/synthesize",
+                    json=payload,
+                    timeout=self.timeout_sec,
+                )
+                response.raise_for_status()
+                break
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= self.max_retries:
+                    raise RuntimeError(
+                        f"tts-engine is unavailable after {self.max_retries} attempts: {exc}"
+                    ) from exc
+                sleep_sec = self.retry_backoff_sec * attempt
+                logger.warning(
+                    "tts-engine request failed (attempt %s/%s): %s; retry in %.1fs",
+                    attempt,
+                    self.max_retries,
+                    exc,
+                    sleep_sec,
+                )
+                time.sleep(sleep_sec)
+
+        if response is None:
+            raise RuntimeError(f"tts-engine request failed: {last_exc}")
 
         reported_backend = (response.headers.get("x-tts-backend", "") or "").strip().lower()
         expected_backend = _required_tts_backend()
