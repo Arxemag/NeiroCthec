@@ -20,19 +20,23 @@ logging.basicConfig(level=os.getenv("TTS_LOG_LEVEL", "INFO"), format="%(asctime)
 logger = logging.getLogger("tts-engine")
 
 
-def _runtime_diagnostics() -> dict:
-    use_gpu_env = os.getenv("TTS_USE_GPU", "false")
-    cuda_available = None
-    cuda_device = None
+def _require_gpu() -> bool:
+    return os.getenv("TTS_REQUIRE_GPU", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _gpu_runtime_status() -> tuple[bool, str | None]:
     try:
         import torch  # type: ignore
 
-        cuda_available = bool(torch.cuda.is_available())
-        if cuda_available:
-            cuda_device = torch.cuda.get_device_name(0)
+        if not torch.cuda.is_available():
+            return False, None
+        return True, torch.cuda.get_device_name(0)
     except Exception:
-        cuda_available = None
-        cuda_device = None
+        return False, None
+
+def _runtime_diagnostics() -> dict:
+    use_gpu_env = os.getenv("TTS_USE_GPU", "false")
+    cuda_available, cuda_device = _gpu_runtime_status()
 
     return {
         "backend_requested": _BACKEND,
@@ -44,6 +48,7 @@ def _runtime_diagnostics() -> dict:
         "voices_root": os.getenv("TTS_VOICES_ROOT", "storage/voices"),
         "shared_storage_root": os.getenv("SHARED_STORAGE_ROOT", "/srv/storage"),
         "default_language": os.getenv("TTS_LANGUAGE", "ru"),
+        "tts_require_gpu": _require_gpu(),
     }
 
 class EmotionPayload(BaseModel):
@@ -305,7 +310,10 @@ def health() -> dict:
 
 @app.post("/synthesize")
 def synthesize(request: SynthesizeRequest) -> Response:
-    logger.info("synthesize request: speaker=%s language=%s voice_sample=%s audio_config_keys=%s runtime=%s", request.speaker, request.language, request.voice_sample, sorted((request.audio_config or {}).keys()) if isinstance(request.audio_config, dict) else [], _runtime_diagnostics())
+    runtime = _runtime_diagnostics()
+    logger.info("synthesize request: speaker=%s language=%s voice_sample=%s audio_config_keys=%s runtime=%s", request.speaker, request.language, request.voice_sample, sorted((request.audio_config or {}).keys()) if isinstance(request.audio_config, dict) else [], runtime)
+    if _require_gpu() and not runtime.get("torch_cuda_available"):
+        raise HTTPException(status_code=503, detail="GPU is required for TTS but CUDA is not available")
     if _BACKEND == "mock":
         return _mock_synthesize(request)
 

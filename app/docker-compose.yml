@@ -30,7 +30,7 @@ services:
       - STAGE4_OBJECT_URI_PREFIX=s3://audio
       - STAGE4_SYNTH_MODE=external
       - EXTERNAL_TTS_URL=http://tts-engine:8020
-      - STAGE4_ENFORCE_TTS_BACKEND=false
+      - STAGE4_ENFORCE_TTS_BACKEND=true
       - STAGE4_EXPECT_TTS_BACKEND=coqui
     command: python3 -m uvicorn stage4_service.app:app --host 0.0.0.0 --port 8010 --reload
     volumes:
@@ -47,8 +47,10 @@ services:
       context: .
       dockerfile: tts_engine_service/Dockerfile
     environment:
-      - TTS_BACKEND=auto
-      - TTS_ALLOW_DEGRADED_BACKEND=true
+      - TTS_BACKEND=coqui
+      - TTS_ALLOW_DEGRADED_BACKEND=false
+      - TTS_USE_GPU=true
+      - TTS_REQUIRE_GPU=true
       - TTS_LANGUAGE=ru
       - TTS_VOICES_ROOT=/srv/storage/voices
     volumes:
@@ -56,6 +58,13 @@ services:
       - ./storage:/srv/storage
     ports:
       - "8020:8020"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   postgres:
     image: postgres:16-alpine

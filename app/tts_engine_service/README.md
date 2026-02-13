@@ -31,7 +31,9 @@
 - Если образец не найден (`voice_sample` в запросе и/или файлы в `TTS_VOICES_ROOT`), сервис вернёт `422`, а не будет синтезировать "чужим" голосом.
 
 ## Переменные окружения
-- `TTS_BACKEND=coqui|espeak|mock|auto` (для dev/стабильности пайплайна рекомендуется `auto`)
+- `TTS_BACKEND=coqui|espeak|mock|auto` (для production качества рекомендуется `coqui`)
+- `TTS_USE_GPU=true|false` — попросить Coqui использовать GPU
+- `TTS_REQUIRE_GPU=true|false` — fail-fast: если CUDA недоступна, `/synthesize` вернёт `503`
 - `TTS_LANGUAGE=ru`
 - `TTS_VOICES_ROOT=/srv/storage/voices`
 - `TTS_ALLOW_DEGRADED_BACKEND=false|true`
@@ -49,3 +51,13 @@
 - Для XTTS также применяются параметры из `audio_config.xtts`: `temperature`, `top_k`, `top_p`, `repetition_penalty`.
 
 - Относительные `voice_sample` пути вида `storage/...` автоматически нормализуются через `SHARED_STORAGE_ROOT` (по умолчанию `/srv/storage`).
+
+
+### Рекомендуемый production-профиль качества
+- `TTS_BACKEND=coqui`
+- `TTS_USE_GPU=true`
+- `TTS_REQUIRE_GPU=true`
+- `TTS_ALLOW_DEGRADED_BACKEND=false`
+- `STAGE4_ENFORCE_TTS_BACKEND=true`
+
+Такой профиль запрещает тихие деградации в `espeak/mock` и не даёт продолжать синтез на CPU, если ожидался GPU.
