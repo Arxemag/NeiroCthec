@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 app = FastAPI(title="Standalone TTS Engine")
 logging.basicConfig(level=os.getenv("TTS_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("tts-engine")
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
 
 def _coqui_tos_auto_accept() -> bool:
@@ -102,7 +103,13 @@ def _build_tts_instance(TTS_cls: Any, model_name: str, use_gpu: bool) -> Any:
 
     try:
         builtins.input = _auto_input
-        tts = TTS_cls(model_name=model_name, progress_bar=False, gpu=use_gpu)
+        # Prefer modern API path (without deprecated `gpu=` constructor arg).
+        try:
+            tts = TTS_cls(model_name=model_name, progress_bar=False)
+        except TypeError:
+            # Backward compatibility for older TTS versions that still require `gpu`.
+            tts = TTS_cls(model_name=model_name, progress_bar=False, gpu=use_gpu)
+
         target_device = "cuda" if use_gpu else "cpu"
         if hasattr(tts, "to"):
             try:
