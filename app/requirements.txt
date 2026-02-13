@@ -1,6 +1,6 @@
 # Основные
 numpy<2.0
-scipy==1.14.1
+scipy>=1.11,<1.15
 soundfile
 
 # PyTorch
