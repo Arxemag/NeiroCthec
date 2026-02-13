@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: python3 -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://neiro:neiro@postgres:5432/neirocthec
+      - STAGE4_TTS_URL=http://stage4-tts:8010
+    volumes:
+      - ./:/app
+      - ./storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  stage4-tts:
+    build:
+      context: .
+      dockerfile: stage4_service/Dockerfile
+    environment:
+      - CORE_INTERNAL_URL=http://api:8000/internal
+      - STAGE4_MAX_GPU_JOBS=1
+      - STAGE4_WORKERS=1
+      - STAGE4_OBJECT_ROOT=/srv/storage/object
+      - STAGE4_OBJECT_URI_PREFIX=s3://audio
+      - STAGE4_SYNTH_MODE=external
+      - EXTERNAL_TTS_URL=http://tts-engine:8020
+      - EXTERNAL_TTS_TIMEOUT_SEC=300
+      - STAGE4_ENFORCE_TTS_BACKEND=false
+      - STAGE4_EXPECT_TTS_BACKEND=coqui
+    command: python3 -m uvicorn stage4_service.app:app --host 0.0.0.0 --port 8010
+    volumes:
+      - ./:/srv
+      - ./storage:/srv/storage
+    depends_on:
+      tts-engine:
+        condition: service_started
+    ports:
+      - "8010:8010"
+
+  tts-engine:
+    build:
+      context: .
+      dockerfile: tts_engine_service/Dockerfile
+    environment:
+      - TTS_BACKEND=auto
+      - TTS_ALLOW_DEGRADED_BACKEND=true
+      - TTS_LANGUAGE=ru
+      - TTS_VOICES_ROOT=/srv/storage/voices
+      - COQUI_TOS_AGREED=1
+    volumes:
+      - ./:/srv
+      - ./storage:/srv/storage
+    ports:
+      - "8020:8020"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=neiro
+      - POSTGRES_PASSWORD=neiro
+      - POSTGRES_DB=neirocthec
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neiro -d neirocthec"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
