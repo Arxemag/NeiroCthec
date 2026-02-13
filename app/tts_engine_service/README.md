@@ -35,6 +35,8 @@
 - `TTS_USE_GPU=true|false` — попросить Coqui использовать GPU
 - `TTS_REQUIRE_GPU=true|false` — fail-fast: если CUDA недоступна или Coqui не смог подняться на GPU, `/synthesize` вернёт `503`
 - `TTS_COQUI_GPU_FALLBACK_CPU=true|false` — если инициализация Coqui на GPU упала, попробовать подняться на CPU
+- `TTS_COQUI_TOS_ACCEPTED=true|false` — авто-принятие Coqui CPML в non-interactive среде (ставит `COQUI_TOS_AGREED=1`)
+- `TTS_HOME=/srv/storage/tts_cache` — кэш моделей Coqui (рекомендуется вынести в persistent volume)
 - `TTS_LANGUAGE=ru`
 - `TTS_VOICES_ROOT=/srv/storage/voices`
 - `TTS_ALLOW_DEGRADED_BACKEND=false|true`
@@ -63,3 +65,7 @@
 - `STAGE4_ENFORCE_TTS_BACKEND=true`
 
 Такой профиль запрещает тихие деградации в `espeak/mock`; при проблемах инициализации GPU Coqui сохранит качество движка через CPU fallback вместо аварийного 503.
+
+
+### Важно про ошибку `EOF when reading a line`
+Если видите интерактивный prompt Coqui про лицензию в Docker, включите `TTS_COQUI_TOS_ACCEPTED=true` (или вручную `COQUI_TOS_AGREED=1`). Иначе Coqui попытается вызвать `input()` и упадёт в non-interactive контейнере.

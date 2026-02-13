@@ -21,6 +21,15 @@ logging.basicConfig(level=os.getenv("TTS_LOG_LEVEL", "INFO"), format="%(asctime)
 logger = logging.getLogger("tts-engine")
 
 
+def _coqui_tos_auto_accept() -> bool:
+    return os.getenv("TTS_COQUI_TOS_ACCEPTED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _prepare_coqui_env() -> None:
+    if _coqui_tos_auto_accept():
+        os.environ.setdefault("COQUI_TOS_AGREED", "1")
+        os.environ.setdefault("TTS_HOME", os.getenv("TTS_HOME", "/srv/storage/tts_cache"))
+
 def _require_gpu() -> bool:
     return os.getenv("TTS_REQUIRE_GPU", "false").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -52,6 +61,8 @@ def _runtime_diagnostics() -> dict:
         "default_language": os.getenv("TTS_LANGUAGE", "ru"),
         "tts_require_gpu": _require_gpu(),
         "tts_coqui_gpu_fallback_cpu": _coqui_gpu_fallback_to_cpu(),
+        "tts_coqui_tos_accepted": _coqui_tos_auto_accept(),
+        "coqui_tos_agreed_env": os.getenv("COQUI_TOS_AGREED"),
     }
 
 class EmotionPayload(BaseModel):
@@ -85,6 +96,8 @@ def _init_coqui() -> None:
     if _BACKEND not in {"coqui", "auto"}:
         return
 
+    _prepare_coqui_env()
+    logger.info("coqui env prepared: tos_auto_accept=%s COQUI_TOS_AGREED=%s TTS_HOME=%s", _coqui_tos_auto_accept(), os.getenv("COQUI_TOS_AGREED"), os.getenv("TTS_HOME"))
     try:
         from TTS.api import TTS  # type: ignore
     except Exception as exc:

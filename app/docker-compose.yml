@@ -48,6 +48,9 @@ services:
       dockerfile: tts_engine_service/Dockerfile
     environment:
       - TTS_BACKEND=coqui
+      - TTS_COQUI_TOS_ACCEPTED=true
+      - COQUI_TOS_AGREED=1
+      - TTS_HOME=/srv/storage/tts_cache
       - TTS_ALLOW_DEGRADED_BACKEND=false
       - TTS_USE_GPU=true
       - TTS_COQUI_GPU_FALLBACK_CPU=true
