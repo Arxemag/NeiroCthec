@@ -1,0 +1,29 @@
+# CHANGELOG
+
+## 2026-03-03
+
+### Структура проекта и инфраструктура
+- Зафиксирована целевая архитектура backend-приложения с разделением на `api`, `core`, `db`, `services` и отдельный `frontend`.
+- Определены отдельные сервисы как самостоятельные подпроекты: `stage4_service` (воркер TTS-пайплайна) и `tts_engine_service` (движок синтеза речи на Qwen3-TTS).
+
+### Git и игнорируемые файлы
+- Создан новый `.gitignore` в корне репозитория.
+- Исключены из версионирования:
+  - виртуальные окружения (`.venv`, `venv`, `env`, `app/.venv`);
+  - Python-кэш (`__pycache__`, `*.pyc`, `.pytest_cache`, `.mypy_cache`, `.cache`);
+  - локальные базы данных (`*.db`, `*.sqlite3`, `app/neirocthec.db`);
+  - runtime-хранилище и артефакты (`app/storage/`);
+  - локально развёрнутые сервисы (`app/tts_engine_service/`, `app/stage4_service/`);
+  - frontend-артефакты (`frontend/node_modules`, `.next`, `dist`, `build`, `.turbo`, `.cache`);
+  - файлы окружения (`.env`, `.env.*`, `app/.env`, `app/.env.*`);
+  - мусорные файлы ОС/IDE (`.idea`, `.vscode`, `.DS_Store`, `Thumbs.db`).
+
+### Тестирование
+- Добавлен модуль для тестов backend-приложения: `app/tests`.
+- Структура тестов:
+  - `app/tests/unit` — unit-тесты для модулей `core`, `db`, `services`;
+  - `app/tests/integration` — интеграционные тесты для API и пайплайна.
+- Реализованы первые тесты:
+  - `app/tests/unit/test_emotion_config.py` — проверяет загрузку и структуру конфигурации эмоций (`EmotionConfig` и `app/config/emotion_signals.yaml`).
+  - `app/tests/integration/test_chapters_api.py` — интеграционный тест эндпоинта `/api/chapters/{chapter_id}/process` (404 при отсутствии текста главы).
+
