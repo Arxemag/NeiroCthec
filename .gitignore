@@ -1,114 +1,81 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-app/storage
+########################
+# OS / Editor junk
+########################
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
 
+########################
+# Python
+########################
+__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
 
 # Virtual environments
 .venv/
 venv/
 env/
 ENV/
-env.bak/
-venv.bak/
-
-# Environment variables
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# IDE and editors
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-*.log
-
-# OS files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-desktop.ini
-
-# PyCharm
-.idea/
-.idea/*
-!.idea/inspectionProfiles
-!.idea/scopes
-*.iml
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-*.ipynb
+app/.venv/
 
 # Unit test / coverage reports
-htmlcov/
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
 .pytest_cache/
+.mypy_cache/
+.cache/
+.coverage*
+htmlcov/
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+########################
+# Env / secrets
+########################
+.env
+.env.*
+app/.env
+app/.env.*
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Database files
+########################
+# Databases / runtime artifacts
+########################
 *.db
 *.sqlite3
-*.db-journal
+app/neirocthec.db
 
-# Sphinx documentation
-docs/_build/
+########################
+# Project-specific runtime data
+########################
+app/storage/
+app/storage/**
 
-# MyPy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+# TTS and local services (развёрнуты локально, не коммитим)
+app/tts_engine_service/
+app/stage4_service/
 
-# Pyre type checker
-.pyre/
+########################
+# Python bytecode in app
+########################
+app/__pycache__/
+app/**/__pycache__/
 
-# PyCharm project files
-.project
-.pydevproject
+########################
+# Frontend
+########################
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/build/
+frontend/.turbo/
+frontend/.cache/
 
-app.py
-app_xz.py
