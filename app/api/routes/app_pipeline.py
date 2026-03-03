@@ -112,7 +112,8 @@ def _assemble_final_audio(user_id: str, book_id: str) -> Path | None:
             return None
         lines_data = state.get("lines") or []
         done = state.get("done") or {}
-        if len(done) < len(lines_data):
+        # Если нет ни одной готовой строки — сборку не запускаем.
+        if not lines_data or not done:
             return None
     out_file = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
     if out_file.exists():
@@ -195,7 +196,14 @@ def get_book_status(
     total = len(lines)
     tts_done = len(done)
     progress = int(100 * tts_done / total) if total else 0
-    stage = "processing" if state.get("pending") else "done" if total and tts_done >= total else "idle"
+    has_pending = bool(state.get("pending"))
+    if has_pending:
+        stage = "processing"
+    elif tts_done > 0:
+        # Очередь пуста, но есть хотя бы одна готовая строка — считаем, что сборка завершена (даже если часть строк не озвучена).
+        stage = "done"
+    else:
+        stage = "idle"
     return {
         "stage": stage,
         "progress": progress,
@@ -270,24 +278,33 @@ def post_process_book_stage4(
 
     # Собираем задачи (до max_tasks строк)
     lines_data = []
+    # Мержим с настройками из /books/settings/audio
+    config_voice_ids = (_audio_settings.get("config") or {}).get("voice_ids") or {}
+    effective_voice_ids: dict[str, str] = {}
+    for role in ("narrator", "male", "female"):
+        if isinstance(voice_ids, dict) and voice_ids.get(role):
+            effective_voice_ids[role] = str(voice_ids[role])
+        elif isinstance(config_voice_ids, dict) and config_voice_ids.get(role):
+            effective_voice_ids[role] = str(config_voice_ids[role])
+
     for line in sorted(ubf.lines, key=lambda l: l.idx):
         if len(lines_data) >= max_tasks:
             break
         if not (line.original or "").strip():
             continue
+        # Определяем роль для строки и подставляем выбранный пользователем голос.
+        role = line.speaker or "narrator"
+        voice_override = effective_voice_ids.get(role)
+        # Если для роли выбран конкретный voiceId, передаём его как speaker в TTS;
+        # иначе оставляем роль (narrator/male/female), и движок возьмёт дефолтный голос.
+        voice_for_tts = voice_override or role
         lines_data.append({
             "line_id": line.idx,
             "text": line.original.strip(),
-            "voice": line.speaker or "narrator",
+            "voice": voice_for_tts,
             "emotion": _emotion_to_dict(line.emotion),
-            "audio_config": {"voice_ids": voice_ids} if voice_ids else None,
+            "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
         })
-
-    # Мержим с настройками из /books/settings/audio
-    config_voice_ids = (_audio_settings.get("config") or {}).get("voice_ids") or {}
-    for task in lines_data:
-        if not (task.get("audio_config") or {}).get("voice_ids"):
-            task["audio_config"] = {"voice_ids": config_voice_ids}
 
     pending = deque([t["line_id"] for t in lines_data])
     key = (user_id, book_id)
@@ -297,7 +314,7 @@ def post_process_book_stage4(
             "pending": pending,
             "done": {},
             "stop_requested": False,
-            "voice_ids": voice_ids or config_voice_ids,
+            "voice_ids": effective_voice_ids,
         }
         # Добавляем в очередь на выдачу (без дубликатов подряд)
         if key not in _pending_books:

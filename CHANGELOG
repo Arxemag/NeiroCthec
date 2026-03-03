@@ -27,3 +27,40 @@
   - `app/tests/unit/test_emotion_config.py` — проверяет загрузку и структуру конфигурации эмоций (`EmotionConfig` и `app/config/emotion_signals.yaml`).
   - `app/tests/integration/test_chapters_api.py` — интеграционный тест эндпоинта `/api/chapters/{chapter_id}/process` (404 при отсутствии текста главы).
 
+### Озвучка книги и TTS-пайплайн (App API + Qwen3)
+- Добавлен модуль `app/api/routes/app_pipeline.py`:
+  - `POST /internal/process-book-stage4` — запускает пайплайн stage1–stage3 (парсинг, определение спикеров, эмоции), формирует очередь строк для озвучки и сохраняет состояние книги в памяти.
+  - `POST /internal/tts-next` / `POST /internal/tts-complete` — протокол обмена задачами между core и `stage4_service`.
+  - `GET /books/{book_id}` / `GET /books/{book_id}/status` — прогресс озвучки книги и статус для фронта.
+  - `GET /books/{book_id}/download` — сборка итогового `final.wav` через `Stage5Assembler` и скачивание финального файла.
+- Реализовано хранение артефактов озвучки:
+  - `stage4_service` складывает строки в `app/storage/books/{user_id}/{book_id}/lines/line_{id}.wav`;
+  - stage5 собирает из них `final.wav` в `app/storage/books/{user_id}/{book_id}/final.wav`.
+- На фронте:
+  - при работе через App API (`NEXT_PUBLIC_APP_API_URL`) кнопка «Сгенерировать озвучку фрагмента» обращается к новым эндпоинтам и отслеживает прогресс по `GET /books/{id}/status`;
+  - после завершения (stage `done`/`completed`) страница проекта скачивает `final.wav` через `downloadBookAudio` и отображает плеер для прослушивания результата.
+
+### Выбор голосов и интеграция с TTS
+- На странице проекта:
+  - голоса загружаются из App API (`/voices`) и/или из Nest API, группируются по ролям (диктор / мужской / женский);
+  - состояние выбранных голосов (`selectedVoiceIds`) перестало сбрасываться после загрузки файлов: `loadAll({ silent: true })` не перезатирает выбор пользователя.
+- При запуске озвучки:
+  - фронт сохраняет выбор голосов в `/books/settings/audio` и передаёт их в `POST /internal/process-book-stage4`;
+  - backend мёрджит `voice_ids` из запроса и из настроек, подставляет их в каждую строку, и передаёт в `stage4_service`/`tts_engine_service` через поле `speaker` и `audio_config.voice_ids`.
+
+### TTS-движок Qwen3 и GPU
+- Поднят и сконфигурирован `app/tts_engine_service/app.py`:
+  - `GET /health` / `GET /voices` / `POST /synthesize` с поддержкой Qwen3-TTS, espeak и mock-режима.
+  - Логика выбора устройства: при `TTS_DEVICE=auto` и доступном CUDA/ROCm по умолчанию используется GPU; при отсутствии — CPU, с явной диагностикой в логах и `/health`.
+- `stage4_service` переведён на работу с внешним TTS:
+  - запущен `stage4_service` с `STAGE4_SYNTH_MODE=external` и `EXTERNAL_TTS_URL=http://localhost:8020`;
+  - воркер забирает задачи из `core` (`/internal/tts-next`), отправляет текст в TTS и по завершении фиксирует результат через `/internal/tts-complete`.
+
+### Исправления под Windows (консоль, кодировки, финальный файл)
+- Удалены эмодзи и небезопасный вывод в пайплайне:
+  - `stage1_parser`, `stage2_speaker`, `stage5_tts` переведены на безопасный `_safe_print`, который не падает на `UnicodeEncodeError` (charmap) и закрытом stdout.
+  - Убраны спецсимволы (`🎵`, `✅`, стрелки и др.) из логов, заменены на ASCII-подписи.
+- Исправлена ошибка сборки финального файла:
+  - `Stage5Assembler` больше не роняет `GET /books/{id}/download` из-за проблем с кодировкой, успешно собирает `final.wav` и возвращает его на фронт;
+  - фронт корректно воспринимает статус `stage: "done"` и скачивает итоговый файл для прослушивания.
+

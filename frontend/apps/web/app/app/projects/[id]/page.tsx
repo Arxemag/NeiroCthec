@@ -310,38 +310,46 @@ export default function ProjectPage() {
         setPreviewAudios(previewAudiosList);
       }
       
-      // Инициализируем выбранные голоса по ролям
-      const initialVoices: { narrator?: string; male?: string; female?: string } = {};
+      // Инициализируем выбранные голоса по ролям.
+      // Сохраняем уже выбранные пользователем голоса и подставляем дефолты только для пустых ролей.
+      const initialVoices: { narrator?: string; male?: string; female?: string } = {
+        ...selectedVoiceIds,
+      };
       const projectVoices = p.project.voices ?? [];
 
       if (projectVoices.length > 0) {
         for (const pv of projectVoices) {
           const voice = voicesList.find((vo) => vo.id === pv.voiceId);
           if (voice) {
-            if (voice.role === 'narrator') initialVoices.narrator = voice.id;
-            else if (voice.gender === 'male') initialVoices.male = voice.id;
-            else if (voice.gender === 'female') initialVoices.female = voice.id;
+            if (voice.role === 'narrator' && !initialVoices.narrator) initialVoices.narrator = voice.id;
+            else if (voice.gender === 'male' && !initialVoices.male) initialVoices.male = voice.id;
+            else if (voice.gender === 'female' && !initialVoices.female) initialVoices.female = voice.id;
           }
         }
       } else {
         if (isAppApiEnabled()) {
           const byId = (id: string) => voicesList.find((v) => v.id === id)?.id ?? voicesList[0]?.id;
           if (voicesList.length > 0) {
-            initialVoices.narrator = byId('narrator');
-            initialVoices.male = byId('male');
-            initialVoices.female = byId('female');
+            if (!initialVoices.narrator) initialVoices.narrator = byId('narrator');
+            if (!initialVoices.male) initialVoices.male = byId('male');
+            if (!initialVoices.female) initialVoices.female = byId('female');
           }
         } else {
           const narrator = voicesList.find((vo) => vo.role === 'narrator');
           const male = voicesList.find((vo) => vo.role === 'actor' && vo.gender === 'male');
           const female = voicesList.find((vo) => vo.role === 'actor' && vo.gender === 'female');
-          if (narrator) initialVoices.narrator = narrator.id;
-          if (male) initialVoices.male = male.id;
-          if (female) initialVoices.female = female.id;
+          if (narrator && !initialVoices.narrator) initialVoices.narrator = narrator.id;
+          if (male && !initialVoices.male) initialVoices.male = male.id;
+          if (female && !initialVoices.female) initialVoices.female = female.id;
         }
       }
-      
-      setSelectedVoiceIds(initialVoices);
+
+      // При "тихих" обновлениях (после загрузки файла) не перезаписываем выбор пользователя,
+      // если он уже что-то выбрал.
+      const hadSelection = !!(selectedVoiceIds.narrator || selectedVoiceIds.male || selectedVoiceIds.female);
+      if (!opts?.silent || !hadSelection) {
+        setSelectedVoiceIds(initialVoices);
+      }
     } catch (e: any) {
       setError(e?.message ?? 'Ошибка загрузки');
     } finally {

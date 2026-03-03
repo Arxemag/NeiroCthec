@@ -1,15 +1,25 @@
 # core/pipeline/stage5_tts.py
 """
 Stage 5 — Assembler
-🔥 ИСПРАВЛЕН: Корректная сортировка по исходному порядку строк
+Корректная сортировка по исходному порядку строк.
+Вывод в консоль адаптирован под Windows (без эмодзи, только ASCII).
 """
 
 from pathlib import Path
 from typing import List
+import builtins
 import numpy as np
 import soundfile as sf
 
 from core.models import UserBookFormat, Line
+
+
+def _safe_print(*args, **kwargs):
+    """Безопасный print: не падает на UnicodeEncodeError (charmap) и ValueError (закрытый stdout)."""
+    try:
+        builtins.print(*args, **kwargs)
+    except (UnicodeEncodeError, ValueError):
+        pass
 
 
 class Stage5Assembler:
@@ -24,8 +34,8 @@ class Stage5Assembler:
         """Сборка итогового аудио в правильном порядке"""
         out_file.parent.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n🎵 Stage 5: Сборка аудио")
-        print(f"  Выходной файл: {out_file}")
+        _safe_print("\n[Stage5] Сборка аудио")
+        _safe_print(f"  Выходной файл: {out_file}")
 
         return self._correct_order_assemble(ubf, out_file)
 
@@ -37,14 +47,14 @@ class Stage5Assembler:
         # Используем base_line_id для сегментов, чтобы восстановить исходный порядок
         sorted_lines = self._get_correctly_sorted_lines(ubf)
 
-        print(f"  Обработка {len(sorted_lines)} аудио файлов")
-        print(f"  Правильный порядок восстановлен")
+        _safe_print(f"  Обработка {len(sorted_lines)} аудио файлов")
+        _safe_print(f"  Правильный порядок восстановлен")
 
         for i, (sort_key, line) in enumerate(sorted_lines, 1):
             audio_path = self._find_audio_file(line)
 
             if not audio_path:
-                print(f"  ⚠️  Line {line.idx}: файл не найден")
+                _safe_print(f"  [!] Line {line.idx}: файл не найден")
                 # Добавляем тишину для пропущенной строки
                 silence_samples = int(0.5 * self.SAMPLE_RATE)
                 silence = np.zeros(silence_samples, dtype=np.float32)
@@ -209,7 +219,7 @@ class Stage5Assembler:
             order_info = f" (базовый ID: {line.base_line_id})"
 
         duration = len(audio) / sr
-        print(f"    {i:3d}. Line {line.idx}{seg_info}: {duration:.2f}с ({line.speaker}){order_info}")
+        _safe_print(f"    {i:3d}. Line {line.idx}{seg_info}: {duration:.2f}s ({line.speaker}){order_info}")
 
     def _log_statistics(self, out_file: Path, final_audio: np.ndarray, sorted_lines: List[tuple]):
         """Логирование статистики сборки"""
@@ -217,7 +227,7 @@ class Stage5Assembler:
         size_mb = out_file.stat().st_size / 1024 / 1024
 
         # Статистика по спикерам в правильном порядке
-        print(f"\n📊 Порядок спикеров в сборке:")
+        _safe_print(f"\n[Stage5] Порядок спикеров в сборке:")
 
         speakers_in_order = []
         current_speaker = None
@@ -235,97 +245,10 @@ class Stage5Assembler:
         if current_speaker:
             speakers_in_order.append(f"{current_speaker}(x{speaker_count})")
 
-        print(f"   Последовательность: {' → '.join(speakers_in_order)}")
+        _safe_print(f"   Последовательность: {' -> '.join(speakers_in_order)}")
 
-        print(f"\n✅ Stage 5 завершён:")
-        print(f"   Файл: {out_file}")
-        print(f"   Длительность: {duration:.2f} секунд ({duration / 60:.2f} минут)")
-        print(f"   Размер: {size_mb:.2f} MB")
-        print(f"   Аудио сегментов: {len(sorted_lines)}")
-
-
-class FastAssembler(Stage5Assembler):
-    """Ультра-простой ассемблер с правильным порядком"""
-
-    def process(self, ubf: UserBookFormat, out_file: Path) -> Path:
-        """Максимально простая сборка с правильным порядком"""
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-
-        print("Быстрая сборка с правильным порядком...")
-
-        audio_chunks = []
-
-        # Используем правильную сортировку
-        sorted_lines = self._get_correctly_sorted_lines(ubf)
-
-        for sort_key, line in sorted_lines:
-            if not line.audio_path:
-                continue
-
-            path = Path(line.audio_path)
-            if not path.exists():
-                path = self._find_audio_file(line)
-                if not path:
-                    continue
-
-            if path.exists():
-                try:
-                    audio, sr = sf.read(str(path), dtype='float32')
-                    if sr == 44100:
-                        audio = audio[::2]
-                    audio_chunks.append(audio)
-
-                    # Минимальная пауза
-                    pause = np.zeros(int(0.2 * self.SAMPLE_RATE), dtype=np.float32)
-                    audio_chunks.append(pause)
-
-                except:
-                    pass
-
-        if audio_chunks:
-            final_audio = np.concatenate(audio_chunks)
-            sf.write(out_file, final_audio, self.SAMPLE_RATE)
-
-            # Статистика по порядку
-            speakers_seq = []
-            current = None
-            count = 0
-
-            for _, line in sorted_lines:
-                if line.speaker != current:
-                    if current:
-                        speakers_seq.append(f"{current}(x{count})")
-                    current = line.speaker
-                    count = 1
-                else:
-                    count += 1
-
-            if current:
-                speakers_seq.append(f"{current}(x{count})")
-
-            duration = len(final_audio) / self.SAMPLE_RATE
-            print(f"✅ Собрано: {len(audio_chunks)} сегментов, {duration:.2f} секунд")
-            print(f"   Порядок: {' → '.join(speakers_seq)}")
-
-        return out_file
-
-
-# Дополнительная утилита для проверки порядка
-def check_line_order(ubf: UserBookFormat):
-    """Проверяет и выводит порядок строк"""
-    print("\n🔍 ПРОВЕРКА ПОРЯДКА СТРОК:")
-    print("=" * 60)
-
-    assembler = Stage5Assembler()
-    sorted_lines = assembler._get_correctly_sorted_lines(ubf)
-
-    print("Исходный порядок (как в файле):")
-    for i, line in enumerate(ubf.lines[:10]):  # Первые 10 строк
-        seg_info = f" [сегмент {line.segment_index + 1}/{line.segment_total}]" if line.is_segment else ""
-        print(f"  {i + 1:2d}. ID:{line.idx:5d}{seg_info}: {line.speaker} - {line.original[:50]}...")
-
-    print("\nПравильный порядок сборки:")
-    for i, (sort_key, line) in enumerate(sorted_lines[:15]):  # Первые 15 в правильном порядке
-        seg_info = f" [сегмент {line.segment_index + 1}/{line.segment_total}]" if line.is_segment else ""
-        base_info = f" (base:{line.base_line_id})" if line.base_line_id is not None else ""
-        print(f"  {i + 1:2d}. Сортировка:{sort_key}{base_info}: {line.speaker} - {line.original[:40]}...")
+        _safe_print(f"\n[Stage5] Сборка завершена:")
+        _safe_print(f"   Файл: {out_file}")
+        _safe_print(f"   Длительность: {duration:.2f} секунд ({duration / 60:.2f} минут)")
+        _safe_print(f"   Размер: {size_mb:.2f} MB")
+        _safe_print(f"   Аудио сегментов: {len(sorted_lines)}")
