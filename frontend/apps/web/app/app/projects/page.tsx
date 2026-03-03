@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { Check, Trash2, X } from 'lucide-react';
 import { apiJson } from '../../../lib/api';
+import { getAppApiUrl, deleteBooksByProject } from '../../../lib/app-api';
 import { Button } from '../../../components/ui';
 import { useRouter } from 'next/navigation';
 
@@ -90,6 +91,9 @@ export default function ProjectsPage() {
     setDeletingId(id);
     setError(null);
     try {
+      if (getAppApiUrl()) {
+        await deleteBooksByProject(id).catch(() => {});
+      }
       await apiJson(`/api/projects/${id}`, { method: 'DELETE' });
       setProjects((prev) => prev.filter((p) => p.id !== id));
       if (showTrash) loadTrash();

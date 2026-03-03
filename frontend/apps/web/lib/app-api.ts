@@ -98,7 +98,7 @@ export async function uploadBook(file: File): Promise<AppBookUploadResponse> {
   formData.append('file', file);
   const headers = getAppHeaders({ method: 'POST' });
   headers.delete('Content-Type');
-  const res = await fetch(`${base}/books/upload`, {
+  const res = await fetch(`${base}/api/books/upload`, {
     method: 'POST',
     headers,
     body: formData,
@@ -134,9 +134,17 @@ export async function getBookStatus(bookId: string): Promise<AppBookStatusRespon
   return appJson<AppBookStatusResponse>(`/books/${encodeURIComponent(bookId)}/status`);
 }
 
-/** DELETE /books/:id — удалить книгу */
+/** DELETE /api/books/:id — удалить книгу с сервера */
 export async function deleteBook(bookId: string): Promise<{ status: string; book_id: string }> {
-  return appJson<{ status: string; book_id: string }>(`/books/${encodeURIComponent(bookId)}`, { method: 'DELETE' });
+  return appJson<{ status: string; book_id: string }>(`/api/books/${encodeURIComponent(bookId)}`, { method: 'DELETE' });
+}
+
+/** DELETE /api/books/by-project/:projectId — удалить все книги, привязанные к проекту (вызывать перед удалением проекта в Nest). */
+export async function deleteBooksByProject(projectId: string): Promise<{ status: string; deleted_count: number; book_ids: string[] }> {
+  return appJson<{ status: string; deleted_count: number; book_ids: string[] }>(
+    `/api/books/by-project/${encodeURIComponent(projectId)}`,
+    { method: 'DELETE' },
+  );
 }
 
 /**
@@ -212,10 +220,11 @@ export async function stopBookStage4(bookId: string): Promise<{ book_id: string;
 export type AppVoice = {
   id: string;
   name: string;
+  role: 'narrator' | 'male' | 'female';
   sample_url: string;
 };
 
-/** GET /voices — список доступных голосов и URL сэмплов */
+/** GET /voices — список доступных голосов с ролями (диктор, мужской, женский) и URL сэмплов */
 export async function listVoices(): Promise<AppVoice[]> {
   return appJson<AppVoice[]>('/voices');
 }

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, FileUp, Pause, Pencil, Play, Trash2, X } from 'lucide-react';
 import { apiJson } from '../../../../lib/api';
 import { getAccessToken, getStoredUserId } from '../../../../lib/auth';
-import { isAppApiEnabled, listVoices, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio } from '../../../../lib/app-api';
+import { isAppApiEnabled, getAppApiUrl, listVoices, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject } from '../../../../lib/app-api';
 import { Button } from '../../../../components/ui';
 import { useParams, useRouter } from 'next/navigation';
 import { cacheProjectFile, getCachedFile, createFileFromCache, hasCachedFile } from '../../../../lib/file-cache';
@@ -56,7 +56,7 @@ export default function ProjectPage() {
   const [processingProgress, setProcessingProgress] = useState<number>(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [hasStartedGeneration, setHasStartedGeneration] = useState(false);
-  const [uploadedFiles, setUploadedFiles] = useState<Array<{ id: string; file: File; name: string }>>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<Array<{ id: string; file: File; name: string; bookId?: string }>>([]);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
@@ -181,25 +181,40 @@ export default function ProjectPage() {
     }, 2000);
   }
 
-  async function loadAll() {
-    setLoading(true);
+  async function loadAll(opts?: { silent?: boolean }) {
+    if (!opts?.silent) {
+      setLoading(true);
+    }
     setError(null);
     try {
-      const loadVoices = isAppApiEnabled()
-        ? listVoices()
-            .then((appVoices) =>
-              appVoices.map((av) => ({
-                id: av.id,
-                name: av.name,
-                role: (av.id === 'male' || av.id === 'female' ? 'actor' : 'narrator') as 'narrator' | 'actor',
-                language: 'ru',
-                gender: av.id === 'male' ? 'male' : av.id === 'female' ? 'female' : 'male',
-                style: '',
-                hasSample: true,
-              }))
-            )
-            .catch(() => [] as Voice[])
-        : apiJson<{ voices?: Voice[] }>('/api/voices').then((r) => r.voices ?? []).catch(() => [] as Voice[]);
+      const mapAppVoicesToVoice = (appVoices: { id: string; name: string; role: string }[]) =>
+        appVoices.map((av) => ({
+          id: av.id,
+          name: av.name,
+          role: (av.role === 'narrator' ? 'narrator' : 'actor') as 'narrator' | 'actor',
+          language: 'ru',
+          gender: av.role === 'male' ? 'male' : av.role === 'female' ? 'female' : 'neutral',
+          style: '',
+          hasSample: true,
+        }));
+
+      const loadVoices = (async (): Promise<Voice[]> => {
+        const appUrl = getAppApiUrl();
+        if (appUrl) {
+          try {
+            const appVoices = await listVoices();
+            if (appVoices.length > 0) return mapAppVoicesToVoice(appVoices);
+          } catch (e) {
+            console.warn('[Voices] FastAPI /voices failed, falling back to Nest:', e);
+          }
+        }
+        try {
+          const r = await apiJson<{ voices?: Voice[] }>('/api/voices');
+          return (r.voices ?? []) as Voice[];
+        } catch {
+          return [];
+        }
+      })();
 
       const [p, voicesList, a] = await Promise.all([
         apiJson<{ project: Project }>(`/api/projects/${projectId}`),
@@ -553,8 +568,17 @@ export default function ProjectPage() {
     }
   }
 
-  function removeFile(fileId: string) {
+  async function removeFile(fileId: string) {
+    const file = uploadedFiles.find((f) => f.id === fileId);
+    if (file?.bookId && getAppApiUrl()) {
+      try {
+        await deleteBook(file.bookId);
+      } catch {
+        // игнорируем ошибку удаления на сервере, файл убираем из списка
+      }
+    }
     setUploadedFiles((prev) => prev.filter((f) => f.id !== fileId));
+    setLastUploadedBookId((prev) => (file?.bookId === prev ? null : prev));
     setUploadSuccess(false);
   }
 
@@ -577,14 +601,12 @@ export default function ProjectPage() {
 
     try {
       if (appApiUrl) {
-        // Загрузка в app API (POST /books/upload); сохраняем book_id для запуска озвучки и прогресс-бара
-        let lastBookId: string | null = null;
+        const bookIds: string[] = [];
+        const userId = getStoredUserId() ?? (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_DEV_USER_ID) ?? 'anonymous';
         for (const fileData of uploadedFiles) {
-          const response = await fetch(`${appApiUrl.replace(/\/$/, '')}/books/upload`, {
+          const response = await fetch(`${appApiUrl.replace(/\/$/, '')}/api/books/upload`, {
             method: 'POST',
-            headers: {
-              'X-User-Id': getStoredUserId() ?? (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_DEV_USER_ID) ?? 'anonymous',
-            },
+            headers: { 'X-User-Id': userId, 'X-Project-Id': projectId },
             body: (() => {
               const formData = new FormData();
               formData.append('file', fileData.file);
@@ -617,11 +639,12 @@ export default function ProjectPage() {
           }
 
           const data = (await response.json()) as { id?: string; status?: string };
-          if (typeof data?.id === 'string') lastBookId = data.id;
+          if (typeof data?.id === 'string') bookIds.push(data.id);
         }
-        if (lastBookId) setLastUploadedBookId(lastBookId);
+        setUploadedFiles((prev) => prev.map((f, i) => ({ ...f, bookId: bookIds[i] ?? f.bookId })));
+        if (bookIds.length > 0) setLastUploadedBookId(bookIds[bookIds.length - 1]);
         setUploadSuccess(true);
-        await loadAll();
+        await loadAll({ silent: true });
         return;
       }
 
@@ -651,7 +674,7 @@ export default function ProjectPage() {
       }
 
       setUploadSuccess(true);
-      await loadAll();
+      await loadAll({ silent: true });
     } catch (e: any) {
       setError(e?.message ?? 'Не удалось загрузить файлы');
       setUploadError('Загрузка не удалась, повторите попытку');
@@ -775,6 +798,9 @@ export default function ProjectPage() {
     setDeleting(true);
     setError(null);
     try {
+      if (getAppApiUrl()) {
+        await deleteBooksByProject(projectId).catch(() => {});
+      }
       await apiJson(`/api/projects/${projectId}`, { method: 'DELETE' });
       router.push('/app/projects');
     } catch (e: any) {
@@ -784,14 +810,11 @@ export default function ProjectPage() {
     }
   }
 
-  // Группируем голоса по ролям. При App API все голоса показываем в каждой секции (Диктор/Муж/Жен), чтобы пользователь мог назначить любой файл на любую роль.
+  // Группируем голоса по ролям: Диктор, Мужской голос, Женский голос (данные приходят от FastAPI с полем role).
   const voicesByRole = useMemo(() => {
-    if (isAppApiEnabled()) {
-      return { narrator: voices, male: voices, female: voices };
-    }
-    const narrator = voices.filter((v) => v.role === 'narrator');
-    const male = voices.filter((v) => v.role === 'actor' && v.gender === 'male');
-    const female = voices.filter((v) => v.role === 'actor' && v.gender === 'female');
+    const narrator = voices.filter((v) => v.role === 'narrator' || v.gender === 'neutral');
+    const male = voices.filter((v) => v.gender === 'male');
+    const female = voices.filter((v) => v.gender === 'female');
     return { narrator, male, female };
   }, [voices]);
 
