@@ -419,14 +419,15 @@ export default function ProjectPage() {
       try {
         const st = await getBookStatus(bookId);
         setProcessingProgress(st.progress);
-        if (st.stage === 'completed' || st.stage === 'error' || st.progress >= 100) {
+        const isFinished = st.stage === 'completed' || st.stage === 'done' || st.stage === 'error' || st.progress >= 100;
+        if (isFinished) {
           if (progressIntervalRef.current) {
             clearInterval(progressIntervalRef.current);
             progressIntervalRef.current = null;
           }
           setIsProcessing(false);
           setProcessingProgress(st.stage === 'error' ? 0 : 100);
-          if (st.stage === 'completed') {
+          if (st.stage === 'completed' || st.stage === 'done') {
             try {
               const { blob } = await downloadBookAudio(bookId);
               if (finalBookAudioUrlRef.current) URL.revokeObjectURL(finalBookAudioUrlRef.current);
@@ -434,7 +435,7 @@ export default function ProjectPage() {
               finalBookAudioUrlRef.current = url;
               setFinalBookAudioUrl(url);
             } catch {
-              // 409 или сеть — аудио пока недоступно, не блокируем UI
+              // 404/409 или сеть — аудио пока недоступно, не блокируем UI
             }
           }
         }
@@ -472,7 +473,13 @@ export default function ProjectPage() {
         await processBookStage4(lastUploadedBookId, 500, selectedVoiceIds);
         startAppProgressTracking(lastUploadedBookId);
       } catch (e: any) {
-        setError(e?.message ?? 'Не удалось запустить озвучку');
+        const msg = e?.message ?? '';
+        const isNetworkError = /failed to fetch|network error|load failed/i.test(msg) || msg === '';
+        setError(
+          isNetworkError
+            ? `Нет связи с App API (порт 8000). Проверьте: сервер запущен, NEXT_PUBLIC_APP_API_URL=http://localhost:8000, CORS разрешён. Ошибка: ${msg || 'Failed to fetch'}`
+            : msg || 'Не удалось запустить озвучку'
+        );
         setIsProcessing(false);
         setProcessingProgress(0);
       } finally {

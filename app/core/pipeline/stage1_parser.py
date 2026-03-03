@@ -1,10 +1,34 @@
 # core/pipeline/stage1_parser.py
 import re
+import sys
+import builtins
 from pathlib import Path
 from typing import List, Tuple
 from dataclasses import replace
 
 from core.models import Line, Remark, UserBookFormat
+
+
+def _safe_str(s: str, maxlen: int = 200) -> str:
+    """Return string safe for Windows console (charmap): replace non-encodable chars."""
+    if not s:
+        return ""
+    s = s[:maxlen]
+    try:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        s.encode(enc)
+        return s
+    except UnicodeEncodeError:
+        return s.encode("ascii", errors="replace").decode("ascii")
+
+
+def _safe_print(*args, **kwargs):
+    """Print wrapper that ignores ValueError: I/O operation on closed file (Windows console quirks)."""
+    try:
+        builtins.print(*args, **kwargs)
+    except ValueError:
+        # Если stdout/stderr уже закрыт (например, при остановке сервера) — просто игнорируем вывод
+        pass
 
 # Библиотека для качественного разбиения предложений
 try:
@@ -13,7 +37,7 @@ try:
     HAS_RAZDEL = True
 except ImportError:
     HAS_RAZDEL = False
-    print("⚠️  razdel не установлен, используем простое разбиение")
+    _safe_print("[!] razdel не установлен, используем простое разбиение")
 
 DIALOGUE_START_RE = re.compile(r"^\s*[—–−]\s*")
 DASH_SPLIT_RE = re.compile(r"\s*[—–−]\s*")
@@ -266,10 +290,10 @@ class StructuralParser:
         # 🔥 Проверяем порядок ID
         self._validate_line_order(parsed_lines)
 
-        print(f"✅ Stage1: Обработано {len(parsed_lines)} строк")
+        _safe_print(f"[OK] Stage1: Обработано {len(parsed_lines)} строк")
         if self.split_for_xtts:
             segments = [l for l in parsed_lines if l.is_segment]
-            print(f"✅ Stage1: Создано {len(segments)} сегментов")
+            _safe_print(f"[OK] Stage1: Создано {len(segments)} сегментов")
 
         # 🔥 Выводим информацию о порядке
         self._print_order_info(parsed_lines)
@@ -287,7 +311,7 @@ class StructuralParser:
         ids_sorted = sorted(ids)
 
         if ids != ids_sorted:
-            print(f"⚠️  ID не отсортированы! Сортирую...")
+            _safe_print(f"[!] ID не отсортированы! Сортирую...")
             # Сортируем строки по ID
             lines.sort(key=lambda l: l.idx)
 
@@ -296,19 +320,19 @@ class StructuralParser:
         actual_ids = [line.idx for line in lines]
 
         if expected_ids != actual_ids:
-            print(f"⚠️  ID не непрерывны!")
-            print(f"   Ожидалось: {expected_ids[:10]}...")
-            print(f"   Получено: {actual_ids[:10]}...")
+            _safe_print(f"[!] ID не непрерывны!")
+            _safe_print(f"   Ожидалось: {expected_ids[:10]}...")
+            _safe_print(f"   Получено: {actual_ids[:10]}...")
 
             # Исправляем ID
             for i, line in enumerate(lines):
                 line.idx = i
-            print(f"   ✅ ID исправлены")
+            _safe_print(f"   [OK] ID исправлены")
 
     def _print_order_info(self, lines: List[Line]):
         """Выводит информацию о порядке строк"""
-        print("\n📊 Информация о порядке строк:")
-        print("-" * 50)
+        _safe_print("\n[info] Информация о порядке строк:")
+        _safe_print("-" * 50)
 
         # Группируем по базовым ID для сегментов
         base_id_groups = {}
@@ -320,20 +344,20 @@ class StructuralParser:
 
         # Выводим первые 5 групп сегментов
         if base_id_groups:
-            print(f"  Сегменты сгруппированы по {len(base_id_groups)} базовым ID")
+            _safe_print(f"  Сегменты сгруппированы по {len(base_id_groups)} базовым ID")
             for i, (base_id, seg_lines) in enumerate(list(base_id_groups.items())[:3]):
                 seg_ids = [l.idx for l in seg_lines]
-                print(f"    Базовый ID {base_id}: сегменты {seg_ids}")
+                _safe_print(f"    Базовый ID {base_id}: сегменты {seg_ids}")
 
         # Выводим первые 10 строк с их порядком
-        print(f"\n  Первые 10 строк в порядке сборки:")
+        _safe_print(f"\n  Первые 10 строк в порядке сборки:")
         for i, line in enumerate(lines[:10]):
             seg_info = f" [сегмент {line.segment_index + 1}/{line.segment_total}]" if line.is_segment else ""
             base_info = f" (base:{line.base_line_id})" if line.base_line_id != line.idx else ""
-            print(f"    {i:2d}. ID:{line.idx:3d}{seg_info}{base_info}: {line.type} - {line.original[:40]}...")
+            _safe_print(f"    {i:2d}. ID:{line.idx:3d}{seg_info}{base_info}: {line.type} - {_safe_str(line.original, 40)}...")
 
         # Проверяем правильность порядка для Stage5
-        print(f"\n  Проверка для Stage5:")
+        _safe_print(f"\n  Проверка для Stage5:")
         for i in range(min(5, len(lines) - 1)):
             current = lines[i]
             next_line = lines[i + 1]
@@ -343,11 +367,11 @@ class StructuralParser:
                 if current.base_line_id == next_line.base_line_id:
                     # Сегменты одной строки должны идти подряд
                     if current.segment_index < next_line.segment_index:
-                        print(f"    ✅ Сегменты {current.idx} → {next_line.idx}: правильный порядок")
+                        _safe_print(f"    [OK] Сегменты {current.idx} -> {next_line.idx}: правильный порядок")
                     else:
-                        print(f"    ⚠️  Сегменты {current.idx} → {next_line.idx}: НЕПРАВИЛЬНЫЙ порядок!")
+                        _safe_print(f"    [!] Сегменты {current.idx} -> {next_line.idx}: НЕПРАВИЛЬНЫЙ порядок!")
             else:
-                print(f"    {current.idx} → {next_line.idx}: OK")
+                _safe_print(f"    {current.idx} -> {next_line.idx}: OK")
 
 
 # 🔥 Дополнительная утилита для тестирования порядка

@@ -1,11 +1,20 @@
 # core/pipeline/stage2_speaker.py
 import re
 import logging
+import builtins
 from typing import Optional, List, Dict
 from collections import deque, defaultdict
 from dataclasses import dataclass, field
 
 from core.models import Line, UserBookFormat, Remark
+
+
+def _safe_print(*args, **kwargs):
+    """Print wrapper that ignores ValueError: I/O operation on closed file."""
+    try:
+        builtins.print(*args, **kwargs)
+    except ValueError:
+        pass
 
 
 @dataclass
@@ -77,7 +86,7 @@ class SpeakerResolver:
         self._last_ubf = ubf
         self.stats['total_lines'] = len(ubf.lines)
 
-        print(f"\n🎭 Stage 2: Определение спикеров")
+        _safe_print(f"\nStage 2: Определение спикеров")
 
         for line in sorted(ubf.lines, key=lambda l: l.idx):
             self._resolve_line(line)
@@ -223,15 +232,15 @@ class SpeakerResolver:
         total = self.stats['total_lines']
         dialogue = self.stats.get('dialogue_lines', 0)
 
-        print(f"  Всего строк: {total}")
-        print(f"  Диалоговых: {dialogue}")
+        _safe_print(f"  Всего строк: {total}")
+        _safe_print(f"  Диалоговых: {dialogue}")
 
         if dialogue > 0:
-            print(f"  Успешно определено: {self.stats.get('resolved', 0)}")
-            print(f"  Из контекста: {self.stats.get('from_context', 0)}")
-            print(f"  Фолбэк по контексту: {self.stats.get('fallback_context', 0)}")
-            print(f"  Фолбэк male: {self.stats.get('fallback_male', 0)}")
-            print(f"  Фолбэк narrator: {self.stats.get('fallback_narrator', 0)}")
+            _safe_print(f"  Успешно определено: {self.stats.get('resolved', 0)}")
+            _safe_print(f"  Из контекста: {self.stats.get('from_context', 0)}")
+            _safe_print(f"  Фолбэк по контексту: {self.stats.get('fallback_context', 0)}")
+            _safe_print(f"  Фолбэк male: {self.stats.get('fallback_male', 0)}")
+            _safe_print(f"  Фолбэк narrator: {self.stats.get('fallback_narrator', 0)}")
 
         # Распределение спикеров
         speakers = {}
@@ -241,4 +250,4 @@ class SpeakerResolver:
                     speakers[line.speaker] = speakers.get(line.speaker, 0) + 1
 
         if speakers:
-            print(f"  Распределение спикеров: {speakers}")
+            _safe_print(f"  Распределение спикеров: {speakers}")
