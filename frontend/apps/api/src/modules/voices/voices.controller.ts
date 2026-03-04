@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
+import type { Voice } from '@prisma/client';
 import { VoicesService } from './voices.service';
 import { AccessAuthGuard } from '../auth/guards';
 import { StorageService } from '../storage/storage.service';
@@ -22,7 +23,7 @@ export class VoicesController {
   ) {
     const items = await this.voices.list({ language, gender, style, role });
     return {
-      voices: items.map((v) => ({
+      voices: items.map((v: Voice) => ({
         id: v.id,
         name: v.name,
         role: v.role,

@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import type { Project } from '@prisma/client';
 import { AccessAuthGuard } from '../auth/guards';
 import { ProjectsService } from './projects.service';
 import { CreateProjectDto, UpdateProjectDto } from './dto';
@@ -12,7 +13,7 @@ export class ProjectsController {
   async list(@Req() req: any) {
     const projects = await this.projects.listByUser(req.user.sub);
     return {
-      projects: projects.map((p) => ({
+      projects: projects.map((p: Project) => ({
         id: p.id,
         title: p.title,
         language: p.language,
@@ -28,7 +29,7 @@ export class ProjectsController {
   async listTrash(@Req() req: any) {
     const projects = await this.projects.listTrashByUser(req.user.sub);
     return {
-      projects: projects.map((p) => ({
+      projects: projects.map((p: Project) => ({
         id: p.id,
         title: p.title,
         language: p.language,

@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import type { AudioStatus, ProjectStatus, SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
 
@@ -121,9 +122,9 @@ export class AdminService {
       totalUsers,
       totalProjects,
       totalAudios,
-      projectsByStatus: Object.fromEntries(projectsByStatus.map((p) => [p.status, p._count.id])),
-      audiosByStatus: Object.fromEntries(audiosByStatus.map((a) => [a.status, a._count.id])),
-      subscriptionByStatus: Object.fromEntries(subscriptionByStatus.map((s) => [s.subscriptionStatus, s._count.id])),
+      projectsByStatus: Object.fromEntries(projectsByStatus.map((p: { status: ProjectStatus; _count: { id: number } }) => [p.status, p._count.id])),
+      audiosByStatus: Object.fromEntries(audiosByStatus.map((a: { status: AudioStatus; _count: { id: number } }) => [a.status, a._count.id])),
+      subscriptionByStatus: Object.fromEntries(subscriptionByStatus.map((s: { subscriptionStatus: SubscriptionStatus; _count: { id: number } }) => [s.subscriptionStatus, s._count.id])),
       newUsersLast7Days: newUsers7d,
       newUsersLast30Days: newUsers30d,
       projectsCreatedLast7Days: projects7d,

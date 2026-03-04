@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -46,7 +47,7 @@ export class ProjectsService {
     if (existing.userId !== userId) throw new ForbiddenException();
     if (existing.deletedAt) throw new NotFoundException('Project not found');
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       if (patch.voiceIds) {
         await tx.projectVoice.deleteMany({ where: { projectId } });
         await tx.projectVoice.createMany({
