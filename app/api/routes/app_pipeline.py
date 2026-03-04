@@ -6,9 +6,13 @@ stage4 worker дергает /internal/tts-next и /internal/tts-complete.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections import deque
 from pathlib import Path
+
+# Имя файла с последними voice_ids по книге (для переиспользования уже озвученных строк)
+_BOOK_CONFIG_FILENAME = "config.json"
 
 from fastapi import APIRouter, Body, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -57,6 +61,28 @@ def _find_book_txt(book_dir: Path) -> Path | None:
         if p.suffix.lower() == ".txt" and p.is_file():
             return p
     return None
+
+
+def _load_book_voice_config(book_dir: Path) -> dict[str, str] | None:
+    """Читает сохранённые voice_ids книги (narrator/male/female). Нужно для переиспользования строк при повторном запуске."""
+    path = book_dir / _BOOK_CONFIG_FILENAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        v = data.get("voice_ids") if isinstance(data, dict) else None
+        if isinstance(v, dict):
+            return {k: str(v[k]) for k in ("narrator", "male", "female") if v.get(k)}
+    except Exception:
+        pass
+    return None
+
+
+def _save_book_voice_config(book_dir: Path, voice_ids: dict[str, str]) -> None:
+    """Сохраняет voice_ids книги, чтобы при следующем запуске сравнивать и не переозвучивать строки с той же ролью."""
+    book_dir.mkdir(parents=True, exist_ok=True)
+    path = book_dir / _BOOK_CONFIG_FILENAME
+    path.write_text(json.dumps({"voice_ids": voice_ids}, ensure_ascii=False, indent=0), encoding="utf-8")
 
 
 def _emotion_to_dict(emotion: EmotionProfile | None) -> dict:
@@ -302,30 +328,53 @@ def post_process_book_stage4(
             "line_id": line.idx,
             "text": line.original.strip(),
             "voice": voice_for_tts,
+            "role": role,
             "emotion": _emotion_to_dict(line.emotion),
             "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
         })
 
-    pending = deque([t["line_id"] for t in lines_data])
+    # Переиспользование уже озвученных строк: если line_{id}.wav есть и голос роли не менялся — в done, иначе в pending.
+    lines_dir = book_dir / "lines"
+    lines_dir.mkdir(parents=True, exist_ok=True)
+    prev_voice_ids = _load_book_voice_config(book_dir) or {}
+    done: dict[int, str] = {}
+    pending_ids: list[int] = []
+    for t in lines_data:
+        line_id = t["line_id"]
+        role = t.get("role", "narrator")
+        existing_path = lines_dir / f"line_{line_id}.wav"
+        voice_unchanged = prev_voice_ids.get(role) == effective_voice_ids.get(role)
+        if existing_path.exists() and voice_unchanged:
+            done[line_id] = str(existing_path)
+        else:
+            pending_ids.append(line_id)
+    pending = deque(pending_ids)
+    _save_book_voice_config(book_dir, effective_voice_ids)
+
     key = (user_id, book_id)
     with _lock:
         _book_states[key] = {
             "lines": lines_data,
             "pending": pending,
-            "done": {},
+            "done": done,
             "stop_requested": False,
             "voice_ids": effective_voice_ids,
         }
-        # Добавляем в очередь на выдачу (без дубликатов подряд)
-        if key not in _pending_books:
+        # Добавляем в очередь на выдачу только если есть что озвучивать (без дубликатов подряд)
+        if pending and key not in _pending_books:
             _pending_books.append(key)
+
+    # Если все строки переиспользованы (ничего в pending) — сразу собираем финальный WAV.
+    final_path = None
+    if not pending and done:
+        final_path = _assemble_final_audio(user_id, book_id)
 
     return {
         "book_id": book_id,
-        "processed_tasks": 0,
+        "processed_tasks": len(done),
         "remaining_tasks": len(pending),
-        "book_status": "processing",
-        "final_audio_path": None,
+        "book_status": "done" if (not pending and done) else "processing",
+        "final_audio_path": str(final_path) if final_path else None,
         "stopped": False,
     }
 

@@ -4,7 +4,6 @@ from pathlib import Path
 from core.pipeline.stage1_parser import StructuralParser
 from core.pipeline.stage2_speaker import SpeakerResolver
 from core.pipeline.stage3_emotion import EmotionResolver
-from core.pipeline.stage4_voice import VoiceSynthesizer
 from core.pipeline.stage5_tts import Stage5Assembler
 
 router = APIRouter()
@@ -14,6 +13,15 @@ STORAGE_ROOT = Path("storage")
 
 @router.post("/{chapter_id}/process")
 def process_chapter(chapter_id: int):
+    # Ленивый импорт: TTS (Coqui) тяжёлый и не нужен для основного запуска API (озвучка книг — через stage4 worker).
+    try:
+        from core.pipeline.stage4_voice import VoiceSynthesizer
+    except ModuleNotFoundError as e:
+        raise HTTPException(
+            503,
+            detail="TTS не установлен. Для этого эндпоинта установите: pip install TTS. Озвучка книг работает через stage4 worker без TTS в Core API.",
+        ) from e
+
     chapter_dir = STORAGE_ROOT / "chapters" / str(chapter_id)
 
     text_path = chapter_dir / "text.txt"

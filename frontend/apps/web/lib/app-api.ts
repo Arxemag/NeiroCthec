@@ -1,12 +1,14 @@
 /**
  * Клиент для Python App API (порт 8000).
  * Все запросы требуют заголовок X-User-Id.
- * Базовый URL задаётся через NEXT_PUBLIC_APP_API_URL.
+ * Базовый URL задаётся через NEXT_PUBLIC_APP_API_URL (по умолчанию http://localhost:8000 для разработки).
  */
 
 import { getStoredUserId } from './auth';
 
-const APP_API_BASE = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_APP_API_URL) || '';
+const APP_API_BASE =
+  (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_APP_API_URL?.trim()) ||
+  (typeof window !== 'undefined' ? 'http://localhost:8000' : '');
 
 export function getAppApiUrl(): string {
   return APP_API_BASE.replace(/\/$/, '');
@@ -29,16 +31,25 @@ function getAppHeaders(init?: RequestInit): Headers {
 /** GET/POST к app без JSON body (для JSON body используйте appJson). */
 export async function appFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const base = getAppApiUrl();
-  if (!base) throw new Error('NEXT_PUBLIC_APP_API_URL is not set');
+  if (!base) {
+    throw new Error(
+      'App API недоступен: задайте NEXT_PUBLIC_APP_API_URL в .env (например http://localhost:8000) или запустите Core API на порту 8000.',
+    );
+  }
   const headers = getAppHeaders(init);
   if (typeof init.body === 'string' && init.body.length > 0) {
     headers.set('Content-Type', 'application/json');
   }
-  const res = await fetch(`${base}${path.startsWith('/') ? path : `/${path}`}`, {
-    ...init,
-    headers,
-    credentials: 'include',
-  });
+  const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { ...init, headers, credentials: 'include' });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `Не удалось подключиться к App API (${base}). Запустите сервер (python main.py в папке app) или проверьте сеть. Ошибка: ${msg}`,
+    );
+  }
   return res;
 }
 
