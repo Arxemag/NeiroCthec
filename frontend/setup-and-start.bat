@@ -7,7 +7,7 @@ echo.
 
 cd /d "%~dp0"
 
-echo [1/3] Проверка Docker контейнеров...
+echo [1/4] Проверка Docker контейнеров...
 docker-compose ps
 echo.
 echo Если контейнеры не запущены, выполните: docker-compose up -d
@@ -24,7 +24,7 @@ if not exist "apps\api\.env" if exist "apps\api\.env.example" (
 )
 echo.
 
-echo [2/3] Применение миграций Prisma...
+echo [2/4] Применение миграций Prisma...
 cd apps\api
 call npx prisma@6 migrate deploy
 if errorlevel 1 (
@@ -36,7 +36,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo [3/3] Генерация Prisma Client...
+echo [3/4] Генерация Prisma Client...
 call npx prisma@6 generate
 if errorlevel 1 (
     echo.
@@ -46,8 +46,18 @@ if errorlevel 1 (
 )
 echo.
 
+echo [4/4] Seed (планы, голоса, тестовый admin)...
+call npm run seed
+if errorlevel 1 (
+    echo.
+    echo ПРЕДУПРЕЖДЕНИЕ: Seed не выполнен. Голоса и admin могут отсутствовать. Запустите вручную: cd apps\api ^&^& npm run seed
+) else (
+    echo     Голоса и тестовый пользователь admin созданы.
+)
+echo.
+
 echo ========================================
-echo Готово! Миграции применены.
+echo Готово! Миграции применены, seed выполнен.
 echo ========================================
 echo.
 echo Теперь запустите сервисы в отдельных терминалах:
