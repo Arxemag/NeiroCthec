@@ -60,8 +60,7 @@ app/storage/
 app/storage/**
 
 # TTS and local services (развёрнуты локально, не коммитим)
-app/tts_engine_service/
-app/stage4_service/
+
 
 ########################
 # Python bytecode in app
