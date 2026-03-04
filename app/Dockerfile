@@ -26,8 +26,8 @@ RUN pip install --no-cache-dir \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Устанавливаем TTS
-RUN pip install --no-cache-dir TTS==0.22.0
+# Устанавливаем TTS и зависимости для FastAPI TTS-сервиса
+RUN pip install --no-cache-dir TTS==0.22.0 fastapi uvicorn pyyaml qwen-tts
 
 # Копируем код
 COPY . /app
@@ -36,4 +36,6 @@ WORKDIR /app
 # Проверяем CUDA
 RUN python -c "import torch; print('='*60); print('PyTorch версия:', torch.__version__); print('CUDA доступна:', torch.cuda.is_available()); print('CUDA версия:', torch.version.cuda); print('='*60)"
 
-CMD ["python", "test_gpu_tts.py"]
+ENV TTS_ENGINE_PORT=8020
+EXPOSE 8020
+CMD ["python", "-m", "tts_engine_service.app"]

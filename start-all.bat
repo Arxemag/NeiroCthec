@@ -27,13 +27,29 @@ cd ..
 timeout /t 2 /nobreak >nul
 
 set "TTS_PATH=%ROOT%app\tts_engine_service\app.py"
-REM Озвучка только через TTS Qwen3 (app\tts_engine_service). Других TTS-моделей нет.
+REM TTS_MODE: docker = всегда Docker (NVIDIA), local = всегда локальный процесс (AMD/CPU). Не задан = авто по nvidia-smi.
 
 echo [2/7] Core API (Python, http://localhost:8000)...
 start "Core API" cmd /k "cd /d %ROOT%app && (if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat) && python main.py"
 timeout /t 4 /nobreak >nul
 
-echo [3/7] TTS Qwen3 (http://localhost:8020)...
+if /i "%TTS_MODE%"=="docker" goto :tts_docker
+if /i "%TTS_MODE%"=="local" goto :tts_local
+nvidia-smi >nul 2>&1
+if errorlevel 1 goto :tts_local
+:tts_docker
+echo [3/7] TTS Qwen3 (Docker, NVIDIA, http://localhost:8020)...
+cd /d "%ROOT%app"
+docker compose up -d tts 2>nul
+if errorlevel 1 (
+    echo      Docker TTS не запустился. Запускаю локальный TTS...
+    goto :tts_local
+)
+cd /d "%ROOT%"
+timeout /t 5 /nobreak >nul
+goto :tts_done
+:tts_local
+echo [3/7] TTS Qwen3 (локально, http://localhost:8020)...
 if exist "%TTS_PATH%" (
     echo      Запуск TTS Qwen3: app\tts_engine_service...
     start "TTS Qwen3" cmd /k "cd /d %ROOT%app && (if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat) && python -m tts_engine_service.app & echo. & echo Код выхода: %%errorlevel%% & pause"
@@ -42,6 +58,7 @@ if exist "%TTS_PATH%" (
     echo      Не найден app\tts_engine_service\app.py. Озвучка будет недоступна.
     echo      См. docs\TTS_QWEN3.md — как поднять Qwen3 на порту 8020.
 )
+:tts_done
 
 echo [4/7] Stage4 TTS Worker (только Qwen3, http://localhost:8001)...
 start "Stage4 Worker" cmd /k "cd /d %ROOT%app && set "CORE_INTERNAL_URL=http://localhost:8000/internal" && set "STAGE4_SYNTH_MODE=external" && set "EXTERNAL_TTS_URL=http://localhost:8020" && (if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat) && python -m stage4_service.app"
@@ -64,5 +81,8 @@ echo ========================================
 echo.
 echo При первом запуске фронтенда выполните: frontend\setup-and-start.bat
 echo (миграции Prisma и seed).
+echo.
+echo TTS: при наличии NVIDIA запускается Docker, иначе локальный процесс.
+echo     Принудительно: set TTS_MODE=docker  или  set TTS_MODE=local
 echo.
 pause
