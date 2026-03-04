@@ -1,0 +1,14 @@
+# Не копировать в образ (экономия контекста и размера)
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.git
+*.md
+storage
+*.db
+.env
+.env.*

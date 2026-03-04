@@ -23,5 +23,9 @@ class LocalObjectStorage:
         return p
 
     def uri_for_line(self, user_id: str, book_id: str, line_id: int) -> str:
-        """Возвращает абсолютный путь к файлу (основное приложение использует его для stage5)."""
-        return str(self.path_for_line(user_id, book_id, line_id).resolve())
+        """Путь относительно корня storage (books/.../lines/line_N.wav), чтобы Core API в Docker и на хосте разрешали его через свой STORAGE_ROOT."""
+        p = self.path_for_line(user_id, book_id, line_id)
+        try:
+            return str(p.relative_to(self.base))
+        except ValueError:
+            return str(p.resolve())

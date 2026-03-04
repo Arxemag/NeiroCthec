@@ -27,29 +27,51 @@ cd ..
 timeout /t 2 /nobreak >nul
 
 set "TTS_PATH=%ROOT%app\tts_engine_service\app.py"
-REM TTS_MODE: docker = всегда Docker (NVIDIA), local = всегда локальный процесс (AMD/CPU). Не задан = авто по nvidia-smi.
-
-echo [2/7] Core API (Python, http://localhost:8000)...
-set "APP_VENV=%ROOT%app\.venv\Scripts\python.exe"
-if not exist "%APP_VENV%" (
-    echo      Создаю виртуальное окружение app\.venv и устанавливаю зависимости...
-    cd /d "%ROOT%app"
-    python -m venv .venv 2>nul
-    if errorlevel 1 py -3 -m venv .venv 2>nul
-    if not exist ".venv\Scripts\python.exe" (
-        echo      ОШИБКА: Не найден Python. Установите Python 3.10+ и добавьте в PATH
-        echo      ^(Windows: часто срабатывает команда py -3 -m venv .venv^).
-        echo      Вручную: cd app ^&^& python -m venv .venv ^&^& .venv\Scripts\activate ^&^& pip install -r requirements.txt
-        cd /d "%ROOT%"
-    ) else (
-        call .venv\Scripts\activate.bat
-        pip install -r requirements.txt -q
-        cd /d "%ROOT%"
-        echo      Окружение готово.
-    )
+REM CORE_API_MODE: docker = Core API в контейнере, local = локально (Python). Если не задан — спрашиваем.
+if not defined CORE_API_MODE (
+    echo.
+    echo Core API: как запускать?
+    echo   [1] Docker ^(не нужен Python на ПК^)
+    echo   [2] Локально ^(нужен Python 3.10-3.12^)
+    choice /C 12 /N /M "Ваш выбор (1 или 2): "
+    if errorlevel 2 set "CORE_API_MODE=local"
+    if errorlevel 1 set "CORE_API_MODE=docker"
+    echo.
 )
-start "Core API" cmd /k "cd /d %ROOT%app && (if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat) && python main.py"
-timeout /t 4 /nobreak >nul
+
+echo [2/7] Core API (http://localhost:8000)...
+if /i "%CORE_API_MODE%"=="docker" (
+    echo      Запуск Core API в Docker...
+    cd /d "%ROOT%app"
+    docker compose up -d core 2>nul
+    if errorlevel 1 (
+        echo      Не удалось запустить Core API в Docker. Запустите вручную: cd app ^&^& docker compose up -d core
+    ) else (
+        echo      Контейнер core запущен.
+    )
+    cd /d "%ROOT%"
+    timeout /t 4 /nobreak >nul
+) else (
+    set "APP_VENV=%ROOT%app\.venv\Scripts\python.exe"
+    if not exist "%APP_VENV%" (
+        echo      Создаю виртуальное окружение app\.venv и устанавливаю зависимости...
+        cd /d "%ROOT%app"
+        python -m venv .venv 2>nul
+        if errorlevel 1 py -3 -m venv .venv 2>nul
+        if not exist ".venv\Scripts\python.exe" (
+            echo      ОШИБКА: Не найден Python. Установите Python 3.10+ или задайте CORE_API_MODE=docker для запуска в Docker.
+            echo      Вручную: cd app ^&^& docker compose up -d core
+            cd /d "%ROOT%"
+        ) else (
+            call .venv\Scripts\activate.bat
+            pip install -r requirements.txt -q
+            cd /d "%ROOT%"
+            echo      Окружение готово.
+        )
+    )
+    start "Core API" cmd /k "cd /d %ROOT%app && (if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat) && python main.py"
+    timeout /t 4 /nobreak >nul
+)
 
 if /i "%TTS_MODE%"=="docker" goto :tts_docker
 if /i "%TTS_MODE%"=="local" goto :tts_local
@@ -100,10 +122,8 @@ echo.
 echo При первом запуске фронтенда выполните: frontend\setup-and-start.bat
 echo (миграции Prisma и seed).
 echo.
-echo При первом запуске Core API батник создаст app\.venv и установит зависимости.
-echo Если Core API не стартует: в папке app выполните .venv\Scripts\activate и pip install -r requirements.txt
-echo.
-echo TTS: при наличии NVIDIA запускается Docker, иначе локальный процесс.
-echo     Принудительно: set TTS_MODE=docker  или  set TTS_MODE=local
+echo При первом запуске Core API батник спросит: Docker или локально.
+echo Без выбора: set CORE_API_MODE=docker  или  set CORE_API_MODE=local
+echo TTS: при наличии NVIDIA — Docker, иначе локально. Принудительно: set TTS_MODE=docker  или  set TTS_MODE=local
 echo.
 pause

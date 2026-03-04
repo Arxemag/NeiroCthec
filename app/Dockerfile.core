@@ -1,0 +1,17 @@
+# Core API (main.py) — без GPU, Python 3.12 для стабильных wheel-пакетов
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Системные зависимости для soundfile, numpy (минимально)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+CMD ["python", "main.py"]

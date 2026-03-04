@@ -1,7 +1,18 @@
-# TTS Qwen3 в Docker (NVIDIA GPU). Запуск: из папки app/ выполнить docker compose up -d tts
+# Core API и TTS в Docker. Запуск: из папки app/ выполнить docker compose up -d [core] [tts]
 version: '3.8'
 
 services:
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage:/app/storage
+    environment:
+      - PYTHONUNBUFFERED=1
+
   tts:
     build:
       context: .
