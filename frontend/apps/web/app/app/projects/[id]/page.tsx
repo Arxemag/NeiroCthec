@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, FileUp, Pause, Pencil, Play, Trash2, X } from 'lucide-react';
 import { apiJson } from '../../../../lib/api';
 import { getAccessToken, getStoredUserId } from '../../../../lib/auth';
-import { isAppApiEnabled, getAppApiUrl, listVoices, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject } from '../../../../lib/app-api';
+import { isAppApiEnabled, getAppApiUrl, listVoices, listBooksByProject, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject } from '../../../../lib/app-api';
 import { Button } from '../../../../components/ui';
 import { useParams, useRouter } from 'next/navigation';
 import { cacheProjectFile, getCachedFile, createFileFromCache, hasCachedFile } from '../../../../lib/file-cache';
@@ -264,6 +264,16 @@ export default function ProjectPage() {
       }
       
       setPreviewAudios(previewAudiosList);
+
+      // Если App API включён — подтягиваем уже загруженные книги проекта, чтобы не требовать повторной загрузки файла
+      if (isAppApiEnabled()) {
+        try {
+          const projectBooks = await listBooksByProject(projectId);
+          if (projectBooks.length > 0) setLastUploadedBookId(projectBooks[projectBooks.length - 1].id);
+        } catch {
+          /* игнорируем */
+        }
+      }
       
       // Определяем, была ли начата генерация (если есть предварительные аудио или проект в обработке)
       if (previewAudiosList.length > 0 || p.project.status === 'processing' || p.project.status === 'queued') {
@@ -458,7 +468,8 @@ export default function ProjectPage() {
   }
 
   async function generateAudio() {
-    if (uploadedFiles.length === 0) {
+    const hasFiles = uploadedFiles.length > 0 || (isAppApiEnabled() && lastUploadedBookId);
+    if (!hasFiles) {
       setError('Сначала загрузите файлы проекта');
       return;
     }
@@ -1318,6 +1329,8 @@ export default function ProjectPage() {
                     ? 'Отпустите файлы для загрузки'
                     : uploadedFiles.length > 0
                     ? `Выбрано файлов: ${uploadedFiles.length}`
+                    : lastUploadedBookId && isAppApiEnabled()
+                    ? 'В проекте уже загружен текст. Можно запустить озвучку без повторной загрузки.'
                     : 'Перетащите файлы в область или выберите с устройства нажав кнопку ниже'}
                 </div>
                 <div className="mt-2 text-sm text-textSecondary">
@@ -1405,8 +1418,7 @@ export default function ProjectPage() {
                 disabled={
                   generating ||
                   !canEdit ||
-                  uploadedFiles.length === 0 ||
-                  (isAppApiEnabled() && !lastUploadedBookId)
+                  (uploadedFiles.length === 0 && (!isAppApiEnabled() || !lastUploadedBookId))
                 }
                 onClick={generateAudio}
               >

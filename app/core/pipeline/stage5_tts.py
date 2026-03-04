@@ -125,51 +125,13 @@ class Stage5Assembler:
         return sorted(lines_with_sort_key, key=lambda x: x[0])
 
     def _find_audio_file(self, line: Line) -> Path | None:
-        """Находит аудио файл в разных местах"""
-        # 1. Проверяем путь из line.audio_path
-        if line.audio_path:
-            path = Path(line.audio_path)
-            if path.exists():
-                return path
-
-        # 2. Пробуем найти файл по различным паттернам
-        if line.is_segment:
-            base_id = line.base_line_id if line.base_line_id is not None else line.idx
-            seg_idx = line.segment_index or 0
-            patterns = [
-                # Обработанные файлы (enhanced)
-                f"{base_id:05d}_{line.speaker or 'narrator'}_seg{seg_idx}_enhanced.wav",
-                f"{line.idx:05d}_{line.speaker or 'narrator'}_seg{seg_idx}_enhanced.wav",
-                # Сырые файлы (raw)
-                f"{base_id:05d}_{line.speaker or 'narrator'}_seg{seg_idx}.wav",
-                f"{line.idx:05d}_{line.speaker or 'narrator'}_seg{seg_idx}.wav",
-            ]
-        else:
-            patterns = [
-                # Обработанные файлы (enhanced)
-                f"{line.idx:05d}_{line.speaker or 'narrator'}_enhanced.wav",
-                # Сырые файлы (raw)
-                f"{line.idx:05d}_{line.speaker or 'narrator'}.wav",
-            ]
-
-        # Места для поиска
-        search_dirs = [
-            Path("storage/audio/segments/enhanced"),
-            Path("storage/audio/enhanced"),
-            Path("storage/audio/segments/raw"),
-            Path("storage/audio/raw"),
-            Path("storage/audio/segments"),
-            Path("storage/audio"),
-        ]
-
-        for dir_path in search_dirs:
-            if dir_path.exists():
-                for pattern in patterns:
-                    file_path = dir_path / pattern
-                    if file_path.exists():
-                        return file_path
-
-        return None
+        """Использует только line.audio_path (путь из pipeline: storage/books/.../lines/line_N.wav)."""
+        if not line.audio_path:
+            return None
+        path = Path(line.audio_path)
+        if not path.is_absolute():
+            path = path.resolve()
+        return path if path.exists() else None
 
     def _resample_audio(self, audio: np.ndarray, src_sr: int, target_sr: int) -> np.ndarray:
         """Простой ресемплинг аудио"""

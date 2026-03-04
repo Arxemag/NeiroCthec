@@ -98,13 +98,16 @@ def _emotion_to_dict(emotion: EmotionProfile | None) -> dict:
 
 
 def _build_ubf_from_state(lines_data: list, done: dict) -> UserBookFormat:
-    """Собирает UserBookFormat для stage5 из state (lines + done)."""
+    """Собирает UserBookFormat для stage5 из state (lines + done). Пути к WAV приводятся к абсолютным."""
     line_objs = []
     for t in lines_data:
         line_id = t["line_id"]
         audio_path = done.get(line_id)
         if not audio_path:
             continue
+        p = Path(audio_path)
+        if not p.is_absolute():
+            audio_path = str((STORAGE_ROOT / audio_path).resolve())
         em = t.get("emotion") or {}
         emotion = EmotionProfile(
             energy=em.get("energy", 1.0),
@@ -142,8 +145,12 @@ def _assemble_final_audio(user_id: str, book_id: str) -> Path | None:
         if not lines_data or not done:
             return None
     out_file = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
+    # Удаляем старый final.wav, чтобы сборка всегда писала новый (при смене голосов старый файл не должен отдаваться).
     if out_file.exists():
-        return out_file
+        try:
+            out_file.unlink()
+        except OSError:
+            pass
     ubf = _build_ubf_from_state(lines_data, done)
     if not ubf.lines:
         return None
@@ -154,6 +161,59 @@ def _assemble_final_audio(user_id: str, book_id: str) -> Path | None:
 
 # --- Роутер для /books ---
 books_router = APIRouter()
+_PROJECT_ID_FILE = ".project_id"
+
+
+@books_router.get("")
+def list_books(
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+    project_id: str | None = None,
+):
+    """GET /books?project_id=... — список книг пользователя; при указании project_id только книги этого проекта."""
+    user_id = (x_user_id or "").strip() or "anonymous"
+    base = STORAGE_ROOT / "books" / user_id
+    if not base.exists():
+        return []
+    result = []
+    for candidate in sorted(base.iterdir()):
+        if not candidate.is_dir():
+            continue
+        try:
+            (base / candidate.name).resolve().relative_to(base.resolve())
+        except ValueError:
+            continue
+        book_id = candidate.name
+        if project_id:
+            pid_file = base / book_id / _PROJECT_ID_FILE
+            if not pid_file.exists():
+                continue
+            try:
+                if pid_file.read_text(encoding="utf-8").strip() != project_id.strip():
+                    continue
+            except Exception:
+                continue
+        with _lock:
+            state = _book_states.get((user_id, book_id))
+        status = "uploaded"
+        final_audio_path = None
+        if state:
+            total = len(state.get("lines") or [])
+            if total and len(state.get("done") or {}) >= total:
+                status = "done"
+            elif state.get("pending"):
+                status = "processing"
+            if status == "done":
+                fp = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
+                if fp.exists():
+                    final_audio_path = str(fp)
+        result.append({
+            "id": book_id,
+            "title": book_id,
+            "status": status,
+            "created_at": "",
+            "final_audio_path": final_audio_path,
+        })
+    return result
 
 
 @books_router.get("/settings/audio")
@@ -347,9 +407,23 @@ def post_process_book_stage4(
         if existing_path.exists() and voice_unchanged:
             done[line_id] = str(existing_path)
         else:
+            # Голос роли изменился или файла не было — переозвучиваем. Удаляем старый файл, чтобы не использовать его.
+            if existing_path.exists():
+                try:
+                    existing_path.unlink()
+                except OSError:
+                    pass
             pending_ids.append(line_id)
     pending = deque(pending_ids)
     _save_book_voice_config(book_dir, effective_voice_ids)
+    # Чтобы при смене голосов не отдавать старый final.wav, удаляем его при наличии pending.
+    if pending:
+        final_wav = book_dir / "final.wav"
+        if final_wav.exists():
+            try:
+                final_wav.unlink()
+            except OSError:
+                pass
 
     key = (user_id, book_id)
     with _lock:

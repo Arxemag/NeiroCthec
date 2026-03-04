@@ -135,6 +135,12 @@ export async function listBooks(): Promise<AppBook[]> {
   return appJson<AppBook[]>('/books');
 }
 
+/** GET /books?project_id=... — книги, привязанные к проекту (уже загруженный текст без повторной загрузки). */
+export async function listBooksByProject(projectId: string): Promise<AppBook[]> {
+  const q = new URLSearchParams({ project_id: projectId });
+  return appJson<AppBook[]>(`/books?${q.toString()}`);
+}
+
 /** GET /books/:id — одна книга */
 export async function getBook(bookId: string): Promise<AppBook> {
   return appJson<AppBook>(`/books/${encodeURIComponent(bookId)}`);
