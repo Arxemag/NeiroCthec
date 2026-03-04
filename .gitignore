@@ -39,12 +39,14 @@ app/.venv/
 htmlcov/
 
 ########################
-# Env / secrets
+# Env / secrets (шаблоны .env.example коммитим для партнёров)
 ########################
 .env
 .env.*
 app/.env
 app/.env.*
+!.env.example
+!**/.env.example
 
 ########################
 # Databases / runtime artifacts
