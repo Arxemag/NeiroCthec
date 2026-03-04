@@ -1,3 +1,7 @@
+# Core API (main.py)
+fastapi
+uvicorn[standard]
+
 # Основные
 numpy<2.0
 scipy

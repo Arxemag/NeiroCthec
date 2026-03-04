@@ -30,6 +30,22 @@ set "TTS_PATH=%ROOT%app\tts_engine_service\app.py"
 REM TTS_MODE: docker = всегда Docker (NVIDIA), local = всегда локальный процесс (AMD/CPU). Не задан = авто по nvidia-smi.
 
 echo [2/7] Core API (Python, http://localhost:8000)...
+set "APP_VENV=%ROOT%app\.venv\Scripts\python.exe"
+if not exist "%APP_VENV%" (
+    echo      Создаю виртуальное окружение app\.venv и устанавливаю зависимости...
+    cd /d "%ROOT%app"
+    python -m venv .venv 2>nul
+    if errorlevel 1 (
+        echo      ОШИБКА: Не найден Python. Установите Python 3.10+ и добавьте в PATH.
+        echo      Затем выполните вручную: cd app ^&^& python -m venv .venv ^&^& .venv\Scripts\activate ^&^& pip install -r requirements.txt
+        cd /d "%ROOT%"
+    ) else (
+        call .venv\Scripts\activate.bat
+        pip install -r requirements.txt -q
+        cd /d "%ROOT%"
+        echo      Окружение готово.
+    )
+)
 start "Core API" cmd /k "cd /d %ROOT%app && (if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat) && python main.py"
 timeout /t 4 /nobreak >nul
 
@@ -81,6 +97,9 @@ echo ========================================
 echo.
 echo При первом запуске фронтенда выполните: frontend\setup-and-start.bat
 echo (миграции Prisma и seed).
+echo.
+echo При первом запуске Core API батник создаст app\.venv и установит зависимости.
+echo Если Core API не стартует: в папке app выполните .venv\Scripts\activate и pip install -r requirements.txt
 echo.
 echo TTS: при наличии NVIDIA запускается Docker, иначе локальный процесс.
 echo     Принудительно: set TTS_MODE=docker  или  set TTS_MODE=local
