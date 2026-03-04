@@ -4,15 +4,15 @@
   "version": "0.0.1",
   "type": "commonjs",
   "scripts": {
-    "dev": "nest start --watch",
-    "build": "nest build",
+    "dev": "npx nest start --watch",
+    "build": "npx nest build",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "seed": "ts-node -T prisma/seed.ts",
-    "worker": "ts-node -T src/worker.ts"
+    "prisma:generate": "npx prisma generate",
+    "prisma:migrate": "npx prisma migrate dev",
+    "seed": "npx ts-node -T prisma/seed.ts",
+    "worker": "npx ts-node -T src/worker.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.758.0",
