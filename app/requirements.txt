@@ -22,6 +22,7 @@ natasha>=1.5.0
 # Утилиты
 pydantic
 regex>=2023.0.0
+requests
 
 # Опционально (для Stage 4.5)
 pydub>=0.25.1
