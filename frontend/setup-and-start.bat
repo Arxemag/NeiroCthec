@@ -13,6 +13,17 @@ echo.
 echo Если контейнеры не запущены, выполните: docker-compose up -d
 echo.
 
+if not exist "apps\api\.env" if exist "apps\api\.env.example" (
+    echo Создаю apps\api\.env из .env.example для Prisma DATABASE_URL...
+    copy "apps\api\.env.example" "apps\api\.env" >nul
+    echo     Файл .env создан. При необходимости отредактируйте apps\api\.env
+) else if not exist "apps\api\.env" (
+    echo ОШИБКА: Нет файла apps\api\.env и нет apps\api\.env.example. Скопируйте .env.example в .env и задайте DATABASE_URL.
+    pause
+    exit /b 1
+)
+echo.
+
 echo [2/3] Применение миграций Prisma...
 cd apps\api
 call npx prisma@6 migrate deploy
