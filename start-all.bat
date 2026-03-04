@@ -35,9 +35,11 @@ if not exist "%APP_VENV%" (
     echo      Создаю виртуальное окружение app\.venv и устанавливаю зависимости...
     cd /d "%ROOT%app"
     python -m venv .venv 2>nul
-    if errorlevel 1 (
-        echo      ОШИБКА: Не найден Python. Установите Python 3.10+ и добавьте в PATH.
-        echo      Затем выполните вручную: cd app ^&^& python -m venv .venv ^&^& .venv\Scripts\activate ^&^& pip install -r requirements.txt
+    if errorlevel 1 py -3 -m venv .venv 2>nul
+    if not exist ".venv\Scripts\python.exe" (
+        echo      ОШИБКА: Не найден Python. Установите Python 3.10+ и добавьте в PATH
+        echo      ^(Windows: часто срабатывает команда py -3 -m venv .venv^).
+        echo      Вручную: cd app ^&^& python -m venv .venv ^&^& .venv\Scripts\activate ^&^& pip install -r requirements.txt
         cd /d "%ROOT%"
     ) else (
         call .venv\Scripts\activate.bat
