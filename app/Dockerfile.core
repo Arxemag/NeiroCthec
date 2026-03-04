@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-core.txt .
-RUN pip install --no-cache-dir -r requirements-core.txt
+RUN pip install --no-cache-dir -r requirements-core.txt && \
+    pip install --no-cache-dir python-multipart
 
 COPY . .
 ENV PYTHONUNBUFFERED=1
