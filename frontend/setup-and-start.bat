@@ -15,7 +15,7 @@ echo.
 
 echo [2/3] Применение миграций Prisma...
 cd apps\api
-call npx prisma migrate deploy
+call npx prisma@6 migrate deploy
 if errorlevel 1 (
     echo.
     echo ОШИБКА: Не удалось применить миграции
@@ -26,7 +26,7 @@ if errorlevel 1 (
 echo.
 
 echo [3/3] Генерация Prisma Client...
-call npx prisma generate
+call npx prisma@6 generate
 if errorlevel 1 (
     echo.
     echo ОШИБКА: Не удалось сгенерировать Prisma Client
