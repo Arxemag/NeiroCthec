@@ -29,7 +29,7 @@ export class ProjectsController {
   async listTrash(@Req() req: any) {
     const projects = await this.projects.listTrashByUser(req.user.sub);
     return {
-      projects: projects.map((p: Project) => ({
+      projects: projects.map((p: Pick<Project, 'id' | 'title' | 'language' | 'status' | 'deletedAt'>) => ({
         id: p.id,
         title: p.title,
         language: p.language,
