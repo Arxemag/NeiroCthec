@@ -24,6 +24,10 @@ pydantic
 regex>=2023.0.0
 requests
 
+# Книги: fb2 (stdlib), epub и mobi
+ebooklib>=0.18
+mobi>=0.4
+
 # Опционально (для Stage 4.5)
 pydub>=0.25.1
 tqdm>=4.66.0

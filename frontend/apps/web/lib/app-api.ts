@@ -101,7 +101,7 @@ export type AppProcessBookStage4Response = {
   stopped: boolean;
 };
 
-/** POST /books/upload — загрузка файла .txt/.fb2 */
+/** POST /books/upload — загрузка файла .txt, .fb2, .epub, .mobi */
 export async function uploadBook(file: File): Promise<AppBookUploadResponse> {
   const base = getAppApiUrl();
   if (!base) throw new Error('NEXT_PUBLIC_APP_API_URL is not set');

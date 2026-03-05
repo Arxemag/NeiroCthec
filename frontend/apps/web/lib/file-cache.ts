@@ -34,7 +34,7 @@ export async function cacheProjectFile(
       projectId,
       fileName: file.name,
       fileContent,
-      fileType: file.type || (file.name.endsWith('.f2b') ? 'application/f2b' : 'text/plain'),
+      fileType: file.type || (file.name.toLowerCase().endsWith('.fb2') ? 'application/xml' : file.name.toLowerCase().endsWith('.epub') ? 'application/epub+zip' : file.name.toLowerCase().endsWith('.mobi') ? 'application/x-mobipocket-ebook' : 'text/plain'),
       uploadedAt: new Date().toISOString(),
       fileSize: file.size,
     };

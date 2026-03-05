@@ -5,8 +5,12 @@ import uuid
 from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 
 from api.schemas.book import BookUploadResponse, ChapterOut
+from core.book_convert import book_to_text
 
 router = APIRouter()
+
+ALLOWED_BOOK_EXTENSIONS = (".txt", ".fb2", ".epub", ".mobi")
+EXTRACTED_TXT = "extracted.txt"
 
 # Относительно корня app/ (как в core.voices)
 _APP_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -50,12 +54,18 @@ def upload_book(
     x_project_id: str | None = Header(None, alias="X-Project-Id"),
 ):
     """
-    Загрузка текстового файла книги.
+    Загрузка файла книги: .txt, .fb2, .epub, .mobi.
     X-User-Id — id пользователя. X-Project-Id — id проекта (Nest), чтобы при удалении проекта удалить и книги.
     """
     user_id = (x_user_id or "").strip() or "anonymous"
     project_id = (x_project_id or "").strip() or None
     filename = file.filename or "upload.txt"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_BOOK_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неподдерживаемый формат. Разрешены: {', '.join(ALLOWED_BOOK_EXTENSIONS)}",
+        )
 
     existing_dir = _find_existing_book_dir(user_id, filename, project_id)
     if existing_dir is not None:
@@ -76,10 +86,19 @@ def upload_book(
     with original_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
+    if suffix in (".fb2", ".epub", ".mobi"):
+        try:
+            text = book_to_text(original_path)
+            (original_dir / EXTRACTED_TXT).write_text(text, encoding="utf-8")
+        except Exception as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Не удалось извлечь текст из файла: {e!s}",
+            ) from e
+
     if project_id:
         (book_dir / _PROJECT_ID_FILE).write_text(project_id, encoding="utf-8")
 
-    # ❗️ЗАГЛУШКА: тут позже Stage 1 + разбиение на главы
     chapters = [
         ChapterOut(chapter_id=1, title="Chapter 1")
     ]

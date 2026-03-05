@@ -54,9 +54,13 @@ def _book_dir(user_id: str, book_id: str) -> Path | None:
 
 
 def _find_book_txt(book_dir: Path) -> Path | None:
+    """Ищем текст для пайплайна: предпочтительно extracted.txt (из fb2/epub/mobi), иначе любой .txt."""
     original_dir = book_dir / "original"
     if not original_dir.exists():
         return None
+    extracted = original_dir / "extracted.txt"
+    if extracted.is_file():
+        return extracted
     for p in sorted(original_dir.iterdir()):
         if p.suffix.lower() == ".txt" and p.is_file():
             return p

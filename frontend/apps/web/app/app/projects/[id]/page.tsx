@@ -561,9 +561,10 @@ export default function ProjectPage() {
     }
   }
 
+  const ALLOWED_BOOK_EXTENSIONS = ['.txt', '.fb2', '.epub', '.mobi'];
   function validateFileFormat(file: File): boolean {
     const fileName = file.name.toLowerCase();
-    return fileName.endsWith('.txt') || fileName.endsWith('.f2b');
+    return ALLOWED_BOOK_EXTENSIONS.some((ext) => fileName.endsWith(ext));
   }
 
   function addFiles(files: FileList | File[]) {
@@ -584,7 +585,7 @@ export default function ProjectPage() {
     });
 
     if (invalidFiles.length > 0) {
-      setError(`Неподдерживаемые форматы файлов: ${invalidFiles.join(', ')}. Поддерживаются только .txt и .f2b`);
+      setError(`Неподдерживаемые форматы файлов: ${invalidFiles.join(', ')}. Поддерживаются: ${ALLOWED_BOOK_EXTENSIONS.join(', ')}`);
     }
 
     if (validFiles.length > 0) {
@@ -1311,7 +1312,7 @@ export default function ProjectPage() {
               ref={fileInputRef}
               id={`file-input-${projectId}`}
               type="file"
-              accept=".txt,.f2b"
+              accept=".txt,.fb2,.epub,.mobi"
               multiple
               className="sr-only"
               onChange={handleFileSelect}
@@ -1334,7 +1335,7 @@ export default function ProjectPage() {
                     : 'Перетащите файлы в область или выберите с устройства нажав кнопку ниже'}
                 </div>
                 <div className="mt-2 text-sm text-textSecondary">
-                  Поддерживаются файлы: <span className="font-medium text-text">.txt</span> и <span className="font-medium text-text">.f2b</span> (можно выбрать несколько)
+                  Поддерживаются файлы: <span className="font-medium text-text">.txt</span>, <span className="font-medium text-text">.fb2</span>, <span className="font-medium text-text">.epub</span>, <span className="font-medium text-text">.mobi</span> (можно выбрать несколько)
                 </div>
               </div>
               <button
