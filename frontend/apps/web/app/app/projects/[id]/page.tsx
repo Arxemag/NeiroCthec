@@ -1312,7 +1312,7 @@ export default function ProjectPage() {
               ref={fileInputRef}
               id={`file-input-${projectId}`}
               type="file"
-              accept=".txt,.fb2,.epub,.mobi"
+              accept={ALLOWED_BOOK_EXTENSIONS.join(',')}
               multiple
               className="sr-only"
               onChange={handleFileSelect}
