@@ -170,6 +170,14 @@ docker compose up -d stage4 tts
     ```
   - если при установке падает скрипт `napi-postinstall`, можно пересобрать с пропуском скриптов: в корневом `docker-compose.yml` у сервиса `frontend_deps` в `command` заменить `npm install` на `npm install --ignore-scripts`, затем снова `docker compose up -d` (при необходимости предварительно удалить volume `frontend_node_modules`).
 
+- **Web: EACCES permission denied в `apps/web/.next`**:
+  - в `docker-compose` для сервиса `web` добавлен том `frontend_web_next` для каталога `apps/web/.next`, чтобы артефакты сборки Next.js не писались в примонтированную папку и не вызывали конфликта прав. Если ошибка появилась до этого изменения — пересоздайте контейнер и при необходимости удалите старый кэш:
+    ```bat
+    docker compose down
+    docker compose up -d web
+    ```
+  - при необходимости можно вручную удалить папку `frontend/apps/web/.next` на хосте (остановив контейнер), после чего поднять `web` снова.
+
 - **NestJS или Next.js не стартуют**:
   - смотрите логи:
     ```bat
