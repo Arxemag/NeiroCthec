@@ -9,9 +9,29 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # Монтируем весь код для hot-reload в dev
+      - ./:/app
+      # Хранилище книг/аудио (общий том со stage4 и tts)
       - ./storage:/app/storage
     environment:
       - PYTHONUNBUFFERED=1
+
+  stage4:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    depends_on:
+      - core
+    environment:
+      # Core API внутри общей сети compose
+      - CORE_INTERNAL_URL=http://core:8000/internal
+      - STAGE4_SYNTH_MODE=external
+      # По умолчанию — локальный TTS Qwen3 на хосте (AMD)
+      - EXTERNAL_TTS_URL=http://host.docker.internal:8020
+    volumes:
+      - ./:/app
+      - ./storage:/app/storage
+    command: ["python", "-m", "stage4_service.app"]
 
   tts:
     build:

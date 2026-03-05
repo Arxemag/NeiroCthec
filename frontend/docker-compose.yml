@@ -27,7 +27,53 @@ services:
     volumes:
       - miniodata:/data
 
+  api:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/api dev"
+    ports:
+      - "4000:4000"
+    env_file:
+      - ./apps/api/.env
+    volumes:
+      - ./:/usr/src/app
+      - api_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  worker:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/api worker"
+    env_file:
+      - ./apps/api/.env
+    volumes:
+      - ./:/usr/src/app
+      - api_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  web:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/web dev"
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./apps/web/.env
+    volumes:
+      - ./:/usr/src/app
+      - web_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - api
+
 volumes:
   pgdata:
   miniodata:
+  api_node_modules:
+  web_node_modules:
 
