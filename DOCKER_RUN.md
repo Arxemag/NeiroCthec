@@ -22,7 +22,32 @@
 
 ---
 
-### 2. Инфраструктура + Frontend (API, Worker, Web)
+### 2. Вариант «всё из корня» (рекомендуется)
+
+В корне проекта лежит единый `docker-compose.yml`, который поднимает все сервисы одной командой:
+
+```bat
+cd NeiroCthec
+docker compose up -d
+```
+
+Будут запущены: **postgres**, **redis**, **minio**, **core**, **stage4**, **api**, **worker**, **web**. Контейнер **tts** (NVIDIA) по умолчанию не стартует — он в профиле `nvidia-tts`. На машине с AMD после этого нужно только поднять локальный TTS (см. раздел 4, вариант A). На машине с NVIDIA можно дополнительно включить TTS:
+
+```bat
+docker compose --profile nvidia-tts up -d
+```
+
+и при необходимости направить Stage4 на контейнер TTS через переменную `EXTERNAL_TTS_URL=http://tts:8020` (например, в `docker-compose.override.yml` для сервиса `stage4`).
+
+Остановка всего стека:
+
+```bat
+docker compose down
+```
+
+---
+
+### 3. Инфраструктура + Frontend по отдельности (из папки frontend)
 
 Из папки `frontend/`:
 
@@ -44,7 +69,7 @@ docker compose up -d
 
 ---
 
-### 3. Core API и Stage4 в Docker
+### 4. Core API и Stage4 по отдельности (из папки app)
 
 Из папки `app/`:
 
@@ -65,7 +90,7 @@ docker compose up -d core stage4
 
 ---
 
-### 4. TTS Qwen3
+### 5. TTS Qwen3
 
 #### Вариант A — локальный TTS на AMD (рекомендуется для вас)
 
@@ -114,7 +139,7 @@ docker compose up -d stage4 tts
 
 ---
 
-### 5. Остановка сервисов
+### 6. Остановка сервисов
 
 - Фронтенд и инфраструктура:
   ```bat
@@ -130,7 +155,7 @@ docker compose up -d stage4 tts
 
 ---
 
-### 6. Частые проблемы
+### 7. Частые проблемы
 
 - **Core API или Stage4 не видят TTS**:
   - убедитесь, что TTS слушает `http://localhost:8020` (локально) или контейнер `tts` запущен и `EXTERNAL_TTS_URL` указывает на `http://tts:8020`;

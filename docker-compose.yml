@@ -1,0 +1,139 @@
+# НейроЧтец — единый запуск всего стека из корня проекта.
+# Запуск: docker compose up -d
+# TTS (NVIDIA): docker compose up -d tts  (опционально, для машин с NVIDIA)
+# Локальный TTS на AMD: запускайте python -m tts_engine_service.app в папке app, порт 8020.
+
+services:
+  # --- Инфраструктура (Postgres, Redis, MinIO) ---
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: neuro
+      POSTGRES_PASSWORD: neuro
+      POSTGRES_DB: neurochtec
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+  # --- Backend (Core API + Stage4) ---
+  core:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.core
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app
+      - ./app/storage:/app/storage
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  stage4:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.core
+    depends_on:
+      - core
+    environment:
+      - CORE_INTERNAL_URL=http://core:8000/internal
+      - STAGE4_SYNTH_MODE=external
+      - EXTERNAL_TTS_URL=http://host.docker.internal:8020
+    volumes:
+      - ./app:/app
+      - ./app/storage:/app/storage
+    command: ["python", "-m", "stage4_service.app"]
+
+  # --- TTS Qwen3 (NVIDIA). Не поднимать на AMD — там TTS локально на 8020. ---
+  tts:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    runtime: nvidia
+    ports:
+      - "8020:8020"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TTS_ENGINE_PORT=8020
+    volumes:
+      - ./app/storage:/app/storage
+      - tts_cache:/root/.cache/tts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - nvidia-tts
+
+  # --- Frontend (NestJS API, Worker, Next.js) ---
+  api:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/api dev"
+    ports:
+      - "4000:4000"
+    env_file:
+      - ./frontend/apps/api/.env
+    volumes:
+      - ./frontend:/usr/src/app
+      - api_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  worker:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/api worker"
+    env_file:
+      - ./frontend/apps/api/.env
+    volumes:
+      - ./frontend:/usr/src/app
+      - api_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  web:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/web dev"
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./frontend/apps/web/.env
+    volumes:
+      - ./frontend:/usr/src/app
+      - web_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  miniodata:
+  tts_cache:
+  api_node_modules:
+  web_node_modules:
