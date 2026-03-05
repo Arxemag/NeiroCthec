@@ -86,54 +86,72 @@ services:
     profiles:
       - nvidia-tts
 
-  # --- Frontend (NestJS API, Worker, Next.js) ---
+  # --- Frontend: один раз ставим зависимости (frontend_deps), затем api/worker/web только запускают скрипты ---
+  frontend_deps:
+    image: node:20
+    working_dir: /usr/src/app
+    volumes:
+      - ./frontend:/usr/src/app
+      - frontend_node_modules:/usr/src/app/node_modules
+    command: sh -c "rm -rf node_modules apps/api/node_modules apps/web/node_modules 2>/dev/null; npm install && npm run -w apps/api prisma:generate"
+
   api:
     image: node:20
     working_dir: /usr/src/app
-    command: sh -c "npm install && npm run -w apps/api dev"
+    command: sh -c "npm run -w apps/api prisma:migrate:deploy && npm run -w apps/api dev"
     ports:
       - "4000:4000"
     env_file:
       - ./frontend/apps/api/.env
+    environment:
+      - DATABASE_URL=postgresql://neuro:neuro@postgres:5432/neurochtec?schema=public
+      - S3_ENDPOINT=http://minio:9000
+      - REDIS_URL=redis://redis:6379
     volumes:
       - ./frontend:/usr/src/app
-      - api_node_modules:/usr/src/app/node_modules
+      - frontend_node_modules:/usr/src/app/node_modules
     depends_on:
-      - postgres
-      - redis
-      - minio
+      frontend_deps: { condition: service_completed_successfully }
+      postgres: { condition: service_started }
+      redis: { condition: service_started }
+      minio: { condition: service_started }
 
   worker:
     image: node:20
     working_dir: /usr/src/app
-    command: sh -c "npm install && npm run -w apps/api worker"
+    command: sh -c "npm run -w apps/api worker"
     env_file:
       - ./frontend/apps/api/.env
+    environment:
+      - DATABASE_URL=postgresql://neuro:neuro@postgres:5432/neurochtec?schema=public
+      - S3_ENDPOINT=http://minio:9000
+      - REDIS_URL=redis://redis:6379
     volumes:
       - ./frontend:/usr/src/app
-      - api_node_modules:/usr/src/app/node_modules
+      - frontend_node_modules:/usr/src/app/node_modules
     depends_on:
-      - postgres
-      - redis
-      - minio
+      frontend_deps: { condition: service_completed_successfully }
+      postgres: { condition: service_started }
+      redis: { condition: service_started }
+      minio: { condition: service_started }
 
   web:
     image: node:20
     working_dir: /usr/src/app
-    command: sh -c "npm install && npm run -w apps/web dev"
+    command: sh -c "npm run -w apps/web dev"
     ports:
       - "3000:3000"
     env_file:
       - ./frontend/apps/web/.env
     volumes:
       - ./frontend:/usr/src/app
-      - web_node_modules:/usr/src/app/node_modules
+      - frontend_node_modules:/usr/src/app/node_modules
     depends_on:
-      - api
+      frontend_deps: { condition: service_completed_successfully }
+      api: { condition: service_started }
 
 volumes:
   pgdata:
   miniodata:
   tts_cache:
-  api_node_modules:
-  web_node_modules:
+  frontend_node_modules:

@@ -161,10 +161,18 @@ docker compose up -d stage4 tts
   - убедитесь, что TTS слушает `http://localhost:8020` (локально) или контейнер `tts` запущен и `EXTERNAL_TTS_URL` указывает на `http://tts:8020`;
   - на Windows для доступа из контейнера к хосту используйте `host.docker.internal`.
 
+- **Ошибки api/worker (EEXIST, symlink, napi-postinstall)**:
+  - зависимости фронта один раз ставит сервис `frontend_deps`; после него стартуют `api`, `worker`, `web`. Если в volume остался старый `node_modules`, удалите его и поднимите стек заново:
+    ```bat
+    docker compose down
+    docker volume rm neirocthec_frontend_node_modules 2>nul
+    docker compose up -d
+    ```
+  - если при установке падает скрипт `napi-postinstall`, можно пересобрать с пропуском скриптов: в корневом `docker-compose.yml` у сервиса `frontend_deps` в `command` заменить `npm install` на `npm install --ignore-scripts`, затем снова `docker compose up -d` (при необходимости предварительно удалить volume `frontend_node_modules`).
+
 - **NestJS или Next.js не стартуют**:
   - смотрите логи:
     ```bat
-    cd frontend
     docker compose logs -f api
     docker compose logs -f web
     ```

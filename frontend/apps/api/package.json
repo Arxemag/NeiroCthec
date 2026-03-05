@@ -11,6 +11,7 @@
     "lint": "eslint .",
     "prisma:generate": "npx prisma generate",
     "prisma:migrate": "npx prisma migrate dev",
+    "prisma:migrate:deploy": "npx prisma migrate deploy",
     "seed": "npx ts-node -T prisma/seed.ts",
     "worker": "npx ts-node -T src/worker.ts"
   },
