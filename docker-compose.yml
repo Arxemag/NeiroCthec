@@ -45,6 +45,7 @@ services:
       - ./app/storage:/app/storage
     environment:
       - PYTHONUNBUFFERED=1
+      - APP_STORAGE_ROOT=/app/storage
 
   stage4:
     build:
@@ -56,6 +57,7 @@ services:
       - CORE_INTERNAL_URL=http://core:8000/internal
       - STAGE4_SYNTH_MODE=external
       - EXTERNAL_TTS_URL=http://host.docker.internal:8020
+      - APP_STORAGE_ROOT=/app/storage
     volumes:
       - ./app:/app
       - ./app/storage:/app/storage

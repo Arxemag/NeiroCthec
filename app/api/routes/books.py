@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import shutil
@@ -14,7 +15,8 @@ EXTRACTED_TXT = "extracted.txt"
 
 # Относительно корня app/ (как в core.voices)
 _APP_ROOT = Path(__file__).resolve().parent.parent.parent
-STORAGE_ROOT = _APP_ROOT / "storage"
+_storage_env = os.environ.get("APP_STORAGE_ROOT") or os.environ.get("CORE_STORAGE_PATH")
+STORAGE_ROOT = Path(_storage_env) if _storage_env else _APP_ROOT / "storage"
 
 
 _PROJECT_ID_FILE = ".project_id"

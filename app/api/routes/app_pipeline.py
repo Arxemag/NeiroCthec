@@ -7,6 +7,7 @@ stage4 worker дергает /internal/tts-next и /internal/tts-complete.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from collections import deque
 from pathlib import Path
@@ -25,7 +26,8 @@ from core.pipeline.stage5_tts import Stage5Assembler
 
 # Корень app/
 _APP_ROOT = Path(__file__).resolve().parent.parent.parent
-STORAGE_ROOT = _APP_ROOT / "storage"
+_storage_env = os.environ.get("APP_STORAGE_ROOT") or os.environ.get("CORE_STORAGE_PATH")
+STORAGE_ROOT = Path(_storage_env) if _storage_env else _APP_ROOT / "storage"
 
 # In-memory настройки голосов
 _audio_settings: dict = {"config": {"voice_ids": {}}}

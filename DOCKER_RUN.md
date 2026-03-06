@@ -114,28 +114,13 @@ EXTERNAL_TTS_URL=http://host.docker.internal:8020
 
 #### Вариант B — TTS в Docker (для NVIDIA‑машины коллеги)
 
-Из папки `app/`:
+Из корня проекта:
 
 ```bat
-cd app
-docker compose up -d tts
+docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile nvidia-tts up -d
 ```
 
-По умолчанию `stage4` настроен на `http://host.docker.internal:8020`.  
-Для использования контейнера TTS можно переопределить `EXTERNAL_TTS_URL`, например, через `docker-compose.override.yml`:
-
-```yaml
-services:
-  stage4:
-    environment:
-      EXTERNAL_TTS_URL: http://tts:8020
-```
-
-и затем:
-
-```bat
-docker compose up -d stage4 tts
-```
+Файл `docker-compose.nvidia-tts.yml` переопределяет `EXTERNAL_TTS_URL=http://tts:8020`, чтобы Stage4 обращался к контейнеру TTS, а не к хосту.
 
 ---
 
@@ -156,6 +141,13 @@ docker compose up -d stage4 tts
 ---
 
 ### 7. Частые проблемы
+
+- **Финальный WAV не собирается (фрагменты line_*.wav есть)**:
+  - финальный WAV собирает **Core API** (не TTS). TTS только синтезирует фрагменты, Stage4 сохраняет их в `storage/books/.../lines/`, Core склеивает в `final.wav`.
+  - проверьте, что Core и Stage4 используют один и тот же storage: в `docker-compose` задан `APP_STORAGE_ROOT=/app/storage` для обоих.
+  - если Core перезапускался после озвучки — состояние пайплайна (`_book_states`) в памяти теряется, сборка не сработает. Перезапустите озвучку книги.
+  - фронтенд должен вызывать Core (порт 8000) для скачивания: `NEXT_PUBLIC_APP_API_URL=http://localhost:8000`. Скачивание (`GET /books/:id/download`) запускает сборку.
+  - при TTS в Docker: используйте `docker-compose.nvidia-tts.yml`, чтобы Stage4 обращался к `http://tts:8020`.
 
 - **Core API или Stage4 не видят TTS**:
   - убедитесь, что TTS слушает `http://localhost:8020` (локально) или контейнер `tts` запущен и `EXTERNAL_TTS_URL` указывает на `http://tts:8020`;

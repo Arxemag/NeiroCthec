@@ -1,0 +1,7 @@
+# Переопределение для запуска TTS в Docker (NVIDIA).
+# Использование: docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile nvidia-tts up -d
+# Stage4 должен обращаться к контейнеру tts, а не к хосту.
+services:
+  stage4:
+    environment:
+      EXTERNAL_TTS_URL: http://tts:8020
