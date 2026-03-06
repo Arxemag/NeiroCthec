@@ -93,6 +93,27 @@ def _save_book_voice_config(book_dir: Path, voice_ids: dict[str, str]) -> None:
     path.write_text(json.dumps({"voice_ids": voice_ids}, ensure_ascii=False, indent=0), encoding="utf-8")
 
 
+def _save_processed_text_with_roles(book_dir: Path, ubf: UserBookFormat) -> None:
+    """
+    Сохраняет обработанный текст с назначенными ролями в processed/text_with_roles.txt.
+    Формат: [ROLE] текст строки
+    """
+    processed_dir = book_dir / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    output_path = processed_dir / "text_with_roles.txt"
+
+    lines_output = []
+    for line in sorted(ubf.lines, key=lambda l: l.idx):
+        text = (line.original or "").strip()
+        if not text:
+            continue
+        role = line.speaker or "narrator"
+        line_type = line.type or "prose"
+        lines_output.append(f"[{role.upper()}] ({line_type}) {text}")
+
+    output_path.write_text("\n".join(lines_output), encoding="utf-8")
+
+
 def _emotion_to_dict(emotion: EmotionProfile | None) -> dict:
     if emotion is None:
         return {}
@@ -378,6 +399,9 @@ def post_process_book_stage4(
             status_code=500,
             detail=f"Pipeline stage1-3 failed: {e!s}",
         ) from e
+
+    # Сохраняем обработанный текст с ролями в processed/text_with_roles.txt
+    _save_processed_text_with_roles(book_dir, ubf)
 
     # Собираем задачи (до max_tasks строк)
     lines_data = []
