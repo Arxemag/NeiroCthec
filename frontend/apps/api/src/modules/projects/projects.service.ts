@@ -27,6 +27,16 @@ export class ProjectsService {
 
   async create(userId: string, data: { title: string; text: string; language: string; voiceIds: string[] }) {
     if (data.voiceIds.length === 0) throw new BadRequestException('At least one voice required');
+    const validVoices = await this.prisma.voice.findMany({
+      where: { id: { in: data.voiceIds }, isActive: true },
+      select: { id: true },
+    });
+    const validIds = validVoices.map((v) => v.id);
+    if (validIds.length === 0) {
+      throw new BadRequestException(
+        'Указанные голоса не найдены в базе. При использовании App API (Core) голоса хранятся отдельно.',
+      );
+    }
     return this.prisma.project.create({
       data: {
         userId,
@@ -34,7 +44,7 @@ export class ProjectsService {
         text: data.text,
         language: data.language,
         voices: {
-          create: data.voiceIds.map((voiceId) => ({ voiceId })),
+          create: validIds.map((voiceId) => ({ voiceId })),
         },
       },
       include: { voices: true },
@@ -48,12 +58,20 @@ export class ProjectsService {
     if (existing.deletedAt) throw new NotFoundException('Project not found');
 
     return this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      if (patch.voiceIds) {
-        await tx.projectVoice.deleteMany({ where: { projectId } });
-        await tx.projectVoice.createMany({
-          data: patch.voiceIds.map((voiceId) => ({ projectId, voiceId })),
-          skipDuplicates: true,
+      if (patch.voiceIds && patch.voiceIds.length > 0) {
+        // Фильтруем только те voiceId, которые существуют в Voice (избегаем FK constraint при Core API голосах)
+        const existing = await tx.voice.findMany({
+          where: { id: { in: patch.voiceIds }, isActive: true },
+          select: { id: true },
         });
+        const validIds = existing.map((v) => v.id);
+        await tx.projectVoice.deleteMany({ where: { projectId } });
+        if (validIds.length > 0) {
+          await tx.projectVoice.createMany({
+            data: validIds.map((voiceId) => ({ projectId, voiceId })),
+            skipDuplicates: true,
+          });
+        }
       }
 
       return tx.project.update({

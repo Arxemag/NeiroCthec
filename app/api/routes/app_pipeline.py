@@ -177,6 +177,10 @@ def list_books(
 ):
     """GET /books?project_id=... — список книг пользователя; при указании project_id только книги этого проекта."""
     user_id = (x_user_id or "").strip() or "anonymous"
+    # Без project_id не возвращаем книги — иначе показывались бы книги всех проектов
+    pid = (project_id or "").strip()
+    if not pid:
+        return []
     base = STORAGE_ROOT / "books" / user_id
     if not base.exists():
         return []
@@ -189,29 +193,30 @@ def list_books(
         except ValueError:
             continue
         book_id = candidate.name
-        if project_id:
-            pid_file = base / book_id / _PROJECT_ID_FILE
-            if not pid_file.exists():
+        pid_file = base / book_id / _PROJECT_ID_FILE
+        if not pid_file.exists():
+            continue
+        try:
+            if pid_file.read_text(encoding="utf-8").strip() != pid:
                 continue
-            try:
-                if pid_file.read_text(encoding="utf-8").strip() != project_id.strip():
-                    continue
-            except Exception:
-                continue
+        except Exception:
+            continue
         with _lock:
             state = _book_states.get((user_id, book_id))
         status = "uploaded"
         final_audio_path = None
+        fp = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
         if state:
             total = len(state.get("lines") or [])
             if total and len(state.get("done") or {}) >= total:
                 status = "done"
             elif state.get("pending"):
                 status = "processing"
-            if status == "done":
-                fp = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
-                if fp.exists():
-                    final_audio_path = str(fp)
+        # final.wav на диске — показываем даже при потере state (перезапуск Core)
+        if fp.exists():
+            final_audio_path = str(fp)
+            if status == "uploaded":
+                status = "done"
         result.append({
             "id": book_id,
             "title": book_id,
@@ -250,16 +255,17 @@ def get_book(
         state = _book_states.get(key)
     status = "uploaded"
     final_audio_path = None
+    final_path = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
     if state:
         total_lines = len(state.get("lines") or [])
         if total_lines and len(state.get("done") or {}) >= total_lines:
             status = "done"
         elif state.get("pending"):
             status = "processing"
-        if status == "done":
-            final_path = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
-            if final_path.exists():
-                final_audio_path = str(final_path)
+    if final_path.exists():
+        final_audio_path = str(final_path)
+        if status == "uploaded":
+            status = "done"
     return {
         "id": book_id,
         "title": book_id,
@@ -314,6 +320,9 @@ def download_book_audio(
     if not _book_dir(user_id, book_id):
         raise HTTPException(status_code=404, detail="Book not found")
     path = _assemble_final_audio(user_id, book_id)
+    if not path or not path.exists():
+        # Fallback: если state потерян (перезапуск Core), отдаём существующий final.wav
+        path = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
     if not path or not path.exists():
         raise HTTPException(
             status_code=404,

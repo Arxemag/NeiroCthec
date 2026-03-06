@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, FileUp, Pause, Pencil, Play, Trash2, X } from 'lucide-react';
 import { apiJson } from '../../../../lib/api';
 import { getAccessToken, getStoredUserId } from '../../../../lib/auth';
-import { isAppApiEnabled, getAppApiUrl, listVoices, listBooksByProject, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject } from '../../../../lib/app-api';
+import { isAppApiEnabled, getAppApiUrl, listVoices, listBooksByProject, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject, type AppBook } from '../../../../lib/app-api';
 import { Button } from '../../../../components/ui';
 import { useParams, useRouter } from 'next/navigation';
 import { cacheProjectFile, getCachedFile, createFileFromCache, hasCachedFile } from '../../../../lib/file-cache';
@@ -78,6 +78,8 @@ export default function ProjectPage() {
   /** Blob URL финального аудио книги (GET /books/{id}/download), показывается в «Предпрослушать результат». */
   const [finalBookAudioUrl, setFinalBookAudioUrl] = useState<string | null>(null);
   const finalBookAudioUrlRef = useRef<string | null>(null);
+  /** Список книг проекта из App API (загруженные текстовые файлы). */
+  const [projectBooks, setProjectBooks] = useState<AppBook[]>([]);
 
   async function loadChapters() {
     try {
@@ -265,14 +267,30 @@ export default function ProjectPage() {
       
       setPreviewAudios(previewAudiosList);
 
-      // Если App API включён — подтягиваем уже загруженные книги проекта, чтобы не требовать повторной загрузки файла
-      if (isAppApiEnabled()) {
+      // Если App API включён — подтягиваем уже загруженные книги проекта (только при валидном projectId)
+      if (isAppApiEnabled() && projectId) {
         try {
-          const projectBooks = await listBooksByProject(projectId);
-          if (projectBooks.length > 0) setLastUploadedBookId(projectBooks[projectBooks.length - 1].id);
-        } catch {
-          /* игнорируем */
+          const books = await listBooksByProject(projectId);
+          setProjectBooks(books);
+          if (books.length > 0) setLastUploadedBookId(books[books.length - 1].id);
+          // Загружаем финальный WAV, если есть готовое аудио
+          const bookWithAudio = books.find((b) => b.final_audio_path);
+          if (bookWithAudio) {
+            try {
+              const { blob } = await downloadBookAudio(bookWithAudio.id);
+              if (finalBookAudioUrlRef.current) URL.revokeObjectURL(finalBookAudioUrlRef.current);
+              const url = URL.createObjectURL(blob);
+              finalBookAudioUrlRef.current = url;
+              setFinalBookAudioUrl(url);
+            } catch {
+              /* аудио ещё не готово или недоступно */
+            }
+          }
+        } catch (e) {
+          console.warn('[App API] listBooksByProject failed:', e);
         }
+      } else {
+        setProjectBooks([]);
       }
       
       // Определяем, была ли начата генерация (если есть предварительные аудио или проект в обработке)
@@ -600,6 +618,12 @@ export default function ProjectPage() {
     if (file?.bookId && getAppApiUrl()) {
       try {
         await deleteBook(file.bookId);
+        setProjectBooks((prev) => prev.filter((b) => b.id !== file.bookId));
+        if (finalBookAudioUrlRef.current) {
+          URL.revokeObjectURL(finalBookAudioUrlRef.current);
+          finalBookAudioUrlRef.current = null;
+        }
+        setFinalBookAudioUrl(null);
       } catch {
         // игнорируем ошибку удаления на сервере, файл убираем из списка
       }
@@ -607,6 +631,23 @@ export default function ProjectPage() {
     setUploadedFiles((prev) => prev.filter((f) => f.id !== fileId));
     setLastUploadedBookId((prev) => (file?.bookId === prev ? null : prev));
     setUploadSuccess(false);
+  }
+
+  async function removeProjectBook(bookId: string) {
+    if (!getAppApiUrl()) return;
+    try {
+      await deleteBook(bookId);
+      setProjectBooks((prev) => prev.filter((b) => b.id !== bookId));
+      setLastUploadedBookId((prev) => (prev === bookId ? null : prev));
+      if (finalBookAudioUrlRef.current) {
+        URL.revokeObjectURL(finalBookAudioUrlRef.current);
+        finalBookAudioUrlRef.current = null;
+      }
+      setFinalBookAudioUrl(null);
+      setUploadSuccess(false);
+    } catch {
+      setError('Не удалось удалить файл');
+    }
   }
 
   async function processFiles() {
@@ -672,6 +713,7 @@ export default function ProjectPage() {
         if (bookIds.length > 0) setLastUploadedBookId(bookIds[bookIds.length - 1]);
         setUploadSuccess(true);
         await loadAll({ silent: true });
+        setUploadedFiles([]);
         return;
       }
 
@@ -966,8 +1008,8 @@ export default function ProjectPage() {
   // Определяем шаги прогресса
   const progressSteps = useMemo(() => {
     const hasVoices = selectedVoiceIds.narrator || selectedVoiceIds.male || selectedVoiceIds.female;
-    const hasFiles = uploadedFiles.length > 0;
-    const hasPreviewAudios = previewAudios.length > 0;
+    const hasFiles = uploadedFiles.length > 0 || (isAppApiEnabled() && lastUploadedBookId);
+    const hasPreviewAudios = previewAudios.length > 0 || (isAppApiEnabled() && finalBookAudioUrl);
     const isFullyCompleted = isCompleted;
     const isGenerating = project?.status === 'processing' || project?.status === 'queued';
     const isReady = project?.status === 'ready';
@@ -1009,7 +1051,7 @@ export default function ProjectPage() {
         active: activeStepId === 4,
       },
     ];
-  }, [selectedVoiceIds, uploadedFiles.length, previewAudios.length, hasStartedGeneration, project?.status, isCompleted]);
+  }, [selectedVoiceIds, uploadedFiles.length, previewAudios.length, hasStartedGeneration, project?.status, isCompleted, lastUploadedBookId, finalBookAudioUrl]);
   
   async function completeProject() {
     if (!project || project.status !== 'ready') {
@@ -1293,101 +1335,160 @@ export default function ProjectPage() {
       {/* Секция загрузки файла и генерации */}
       {!isCompleted && (
         <div className="space-y-4">
-          <div className="text-base font-medium text-text">Перетащите или выберите текстовый файл с компьютера</div>
-          {/* Зона drag-and-drop для загрузки файла */}
-          <div
-            onDragEnter={handleDragEnter}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            className={`relative rounded-2xl border-2 border-dashed transition-all duration-200 ${
-              isDragging
-                ? 'border-accent bg-accentSoft/30 shadow-md'
-                : canUploadFile
-                ? 'border-accent/80 bg-accentSoft/20 cursor-pointer hover:border-accent hover:bg-accentSoft/30 hover:shadow-md'
-                : 'border-border bg-surfaceSoft opacity-50'
-            }`}
-          >
-            <input
-              ref={fileInputRef}
-              id={`file-input-${projectId}`}
-              type="file"
-              accept={ALLOWED_BOOK_EXTENSIONS.join(',')}
-              multiple
-              className="sr-only"
-              onChange={handleFileSelect}
-            />
-            <label
-              htmlFor={`file-input-${projectId}`}
-              className="flex flex-col items-center justify-center gap-4 p-10 min-h-[180px] cursor-pointer"
-            >
-              <div className={`rounded-full p-4 transition-colors ${isDragging ? 'bg-accent/25' : 'bg-accent/15'}`}>
-                <FileUp className={`h-8 w-8 ${isDragging ? 'text-primary' : 'text-textSecondary'}`} />
-              </div>
-              <div className="text-center">
-                <div className={`text-base font-semibold font-heading ${isDragging ? 'text-primary' : 'text-text'}`}>
-                  {isDragging
-                    ? 'Отпустите файлы для загрузки'
-                    : uploadedFiles.length > 0
-                    ? `Выбрано файлов: ${uploadedFiles.length}`
-                    : lastUploadedBookId && isAppApiEnabled()
-                    ? 'В проекте уже загружен текст. Можно запустить озвучку без повторной загрузки.'
-                    : 'Перетащите файлы в область или выберите с устройства нажав кнопку ниже'}
-                </div>
-                <div className="mt-2 text-sm text-textSecondary">
-                  Поддерживаются файлы: <span className="font-medium text-text">.txt</span>, <span className="font-medium text-text">.fb2</span>, <span className="font-medium text-text">.epub</span>, <span className="font-medium text-text">.mobi</span> (можно выбрать несколько)
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  openFileDialog();
-                }}
-                disabled={!canUploadFile}
-                className="mt-2 inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg border-2 border-primary dark:border-accent bg-surface px-4 py-2.5 text-sm font-semibold text-primary dark:text-accent transition-colors hover:bg-surfaceSoft hover:border-text disabled:pointer-events-none disabled:opacity-50"
-              >
-                <FileUp className="h-5 w-5" />
-                Выбрать файлы
-              </button>
-              {uploadedFiles.length > 0 && (
-                <div className="mt-3 w-full space-y-2">
-                  <div className="text-xs font-semibold text-zinc-700 mb-2">Выбранные файлы:</div>
-                  {uploadedFiles.map((fileData) => (
-                    <div
-                      key={fileData.id}
-                      className="flex items-center justify-between gap-2 rounded-lg border border-green-300/40 bg-green-50/80 px-3 py-2"
-                    >
-                      <div className="flex items-center gap-2 flex-1 min-w-0">
-                        <div className="rounded-full bg-green-500/20 p-1 shrink-0">
-                          <FileUp className="h-3.5 w-3.5 text-green-600" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-xs font-medium text-green-800 truncate">{fileData.name}</div>
-                          <div className="text-xs text-green-600">
-                            {(fileData.file.size / 1024).toFixed(2)} KB
-                          </div>
+          <input
+            ref={fileInputRef}
+            id={`file-input-${projectId}`}
+            type="file"
+            accept={ALLOWED_BOOK_EXTENSIONS.join(',')}
+            multiple
+            className="sr-only"
+            onChange={handleFileSelect}
+          />
+
+          {/* Список загруженных файлов — показывается, если есть файлы в проекте, lastUploadedBookId, кэш или выбранные для загрузки */}
+          {(projectBooks.length > 0 || uploadedFiles.length > 0 || (isAppApiEnabled() && lastUploadedBookId) || hasCachedFile(projectId)) ? (
+            <div className="space-y-2">
+              <div className="text-base font-medium text-text">Загруженные текстовые файлы</div>
+              <div className="rounded-2xl border border-border bg-surfaceSoft p-4 space-y-2">
+                {projectBooks.length > 0 ? projectBooks.map((book) => (
+                  <div
+                    key={book.id}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <div className="rounded-full bg-accent/20 p-1 shrink-0">
+                        <FileUp className="h-3.5 w-3.5 text-primary" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium text-text truncate">
+                          {book.title || book.id}
+                          {book.status === 'done' && (
+                            <span className="ml-2 text-xs text-green-600 dark:text-green-400">(озвучено)</span>
+                          )}
+                          {book.status === 'processing' && (
+                            <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">(в обработке)</span>
+                          )}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          removeFile(fileData.id);
-                        }}
-                        className="shrink-0 rounded p-1 text-red-600 hover:bg-red-100 transition-colors"
-                        title="Удалить файл"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
                     </div>
-                  ))}
-                </div>
-              )}
-            </label>
-          </div>
+                    <button
+                      type="button"
+                      onClick={() => removeProjectBook(book.id)}
+                      className="shrink-0 rounded p-1 text-textSecondary hover:text-red-600 hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors"
+                      title="Удалить файл"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                )) : lastUploadedBookId ? (
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-2">
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <div className="rounded-full bg-accent/20 p-1 shrink-0">
+                        <FileUp className="h-3.5 w-3.5 text-primary" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium text-text truncate">
+                          Загруженный текст
+                        </div>
+                        <div className="text-xs text-textSecondary">ID: {lastUploadedBookId}</div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeProjectBook(lastUploadedBookId)}
+                      className="shrink-0 rounded p-1 text-textSecondary hover:text-red-600 hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors"
+                      title="Удалить файл"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                ) : null}
+                {uploadedFiles.map((fileData) => (
+                  <div
+                    key={fileData.id}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-green-300/40 dark:border-green-700/40 bg-green-50/80 dark:bg-green-900/20 px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <div className="rounded-full bg-green-500/20 p-1 shrink-0">
+                        <FileUp className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium text-text truncate">{fileData.name}</div>
+                        <div className="text-xs text-textSecondary">
+                          {(fileData.file.size / 1024).toFixed(2)} KB · {fileData.bookId ? 'загружен' : 'ожидает загрузки'}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeFile(fileData.id)}
+                      className="shrink-0 rounded p-1 text-textSecondary hover:text-red-600 hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors"
+                      title="Удалить файл"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!canUploadFile}
+                  className="w-full mt-2 inline-flex items-center justify-center gap-2 rounded-lg border-2 border-dashed border-accent/60 bg-accentSoft/10 px-4 py-2.5 text-sm font-medium text-primary dark:text-accent hover:bg-accentSoft/20 transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                >
+                  <FileUp className="h-4 w-4" />
+                  Добавить файлы
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* Зона drag-and-drop — только когда нет загруженных файлов */
+            <div>
+              <div className="text-base font-medium text-text mb-2">Перетащите или выберите текстовый файл с компьютера</div>
+              <div
+                onDragEnter={handleDragEnter}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`relative rounded-2xl border-2 border-dashed transition-all duration-200 ${
+                  isDragging
+                    ? 'border-accent bg-accentSoft/30 shadow-md'
+                    : canUploadFile
+                    ? 'border-accent/80 bg-accentSoft/20 cursor-pointer hover:border-accent hover:bg-accentSoft/30 hover:shadow-md'
+                    : 'border-border bg-surfaceSoft opacity-50'
+                }`}
+              >
+                <label
+                  htmlFor={`file-input-${projectId}`}
+                  className="flex flex-col items-center justify-center gap-4 p-10 min-h-[180px] cursor-pointer"
+                >
+                  <div className={`rounded-full p-4 transition-colors ${isDragging ? 'bg-accent/25' : 'bg-accent/15'}`}>
+                    <FileUp className={`h-8 w-8 ${isDragging ? 'text-primary' : 'text-textSecondary'}`} />
+                  </div>
+                  <div className="text-center">
+                    <div className={`text-base font-semibold font-heading ${isDragging ? 'text-primary' : 'text-text'}`}>
+                      {isDragging ? 'Отпустите файлы для загрузки' : 'Перетащите файлы в область или выберите с устройства'}
+                    </div>
+                    <div className="mt-2 text-sm text-textSecondary">
+                      Поддерживаются: <span className="font-medium text-text">.txt</span>, <span className="font-medium text-text">.fb2</span>, <span className="font-medium text-text">.epub</span>, <span className="font-medium text-text">.mobi</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openFileDialog();
+                    }}
+                    disabled={!canUploadFile}
+                    className="mt-2 inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg border-2 border-primary dark:border-accent bg-surface px-4 py-2.5 text-sm font-semibold text-primary dark:text-accent transition-colors hover:bg-surfaceSoft hover:border-text disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    <FileUp className="h-5 w-5" />
+                    Выбрать файлы
+                  </button>
+                </label>
+              </div>
+            </div>
+          )}
 
           {/* Кнопки действий */}
           <div className="flex flex-col items-center gap-2">
@@ -1502,8 +1603,8 @@ export default function ProjectPage() {
       {/* Кнопка отправки на полную обработку - показывается только когда основные шаги выполнены */}
       {!isCompleted && (() => {
         const hasVoices = selectedVoiceIds.narrator || selectedVoiceIds.male || selectedVoiceIds.female;
-        const hasFiles = uploadedFiles.length > 0;
-        const hasPreviewAudios = previewAudios.length > 0;
+        const hasFiles = uploadedFiles.length > 0 || (isAppApiEnabled() && lastUploadedBookId);
+        const hasPreviewAudios = previewAudios.length > 0 || (isAppApiEnabled() && finalBookAudioUrl);
         const canSendToFullProcessing = hasVoices && hasFiles && hasPreviewAudios;
         
         return canSendToFullProcessing ? (
