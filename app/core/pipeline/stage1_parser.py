@@ -1,4 +1,5 @@
 # core/pipeline/stage1_parser.py
+import os
 import re
 import sys
 import builtins
@@ -61,7 +62,7 @@ class StructuralParser:
     🔥 ИСПРАВЛЕН: Правильная индексация для сохранения порядка строк
     """
 
-    # Оптимальные параметры для XTTS v2
+    # Оптимальные параметры для XTTS v2 (fallback если env не заданы)
     XTTS_MAX_CHARS = 160
     XTTS_OPTIMAL_MIN = 40
     XTTS_OPTIMAL_MAX = 120
@@ -72,6 +73,10 @@ class StructuralParser:
     def __init__(self, split_for_xtts: bool = True):
         self.split_for_xtts = split_for_xtts
         self._next_id = 0  # 🔥 Счетчик для последовательных ID
+        # Env-параметры чанков (Qwen3: 200/400/600, XTTS: 40/120/160)
+        self._optimal_min = int(os.getenv("TTS_CHUNK_MIN", "200"))
+        self._optimal_max = int(os.getenv("TTS_CHUNK_MAX", "400"))
+        self._max_chars = int(os.getenv("TTS_CHUNK_MAX_HARD", "600"))
 
     @staticmethod
     def _soft_clean(text: str) -> str:
@@ -106,7 +111,7 @@ class StructuralParser:
         """Определяет, нужно ли разбивать текст для XTTS"""
         if not self.split_for_xtts:
             return False
-        return len(text) > self.XTTS_OPTIMAL_MAX
+        return len(text) > self._optimal_max
 
     def _split_for_xtts(self, text: str, line_idx: int, is_dialogue: bool = False) -> List[Line]:
         """Разбивает текст на оптимальные сегменты для XTTS"""
@@ -166,12 +171,24 @@ class StructuralParser:
             return sentences
 
     def _optimize_segments(self, sentences: List[str]) -> List[str]:
-        """Оптимизирует предложения для XTTS"""
+        """Оптимизирует предложения для XTTS. Диалоги (—) никогда не объединяются."""
         segments = []
         current = ""
 
         for sentence in sentences:
-            # Пропускаем очень короткие
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            # Диалог (начинается с —): всегда отдельный сегмент, не объединяем
+            if DIALOGUE_START_RE.match(sentence):
+                if current:
+                    segments.append(current.strip())
+                    current = ""
+                segments.append(sentence)
+                continue
+
+            # Пропускаем очень короткие (только для narrator — диалоги уже обработаны)
             if len(sentence) < 15 and sentence.endswith(('!', '?', '.')):
                 if current:
                     current = f"{current} {sentence}"
@@ -182,16 +199,16 @@ class StructuralParser:
             # Проверяем длину
             potential = f"{current} {sentence}".strip() if current else sentence
 
-            if self.XTTS_OPTIMAL_MIN <= len(potential) <= self.XTTS_OPTIMAL_MAX:
+            if self._optimal_min <= len(potential) <= self._optimal_max:
                 segments.append(potential)
                 current = ""
-            elif len(potential) < self.XTTS_OPTIMAL_MIN:
+            elif len(potential) < self._optimal_min:
                 current = potential
             else:
                 if current:
                     segments.append(current)
 
-                if len(sentence) > self.XTTS_MAX_CHARS:
+                if len(sentence) > self._max_chars:
                     subparts = self._split_long_sentence(sentence)
                     segments.extend(subparts[:-1])
                     current = subparts[-1] if subparts else ""
@@ -200,7 +217,7 @@ class StructuralParser:
 
         # Обрабатываем остаток
         if current:
-            if len(current) < self.XTTS_OPTIMAL_MIN and segments:
+            if len(current) < self._optimal_min and segments:
                 segments[-1] = f"{segments[-1]} {current}"
             else:
                 segments.append(current)
@@ -223,7 +240,7 @@ class StructuralParser:
         for pattern in patterns:
             new_parts = []
             for part in parts:
-                if len(part) <= self.XTTS_MAX_CHARS:
+                if len(part) <= self._max_chars:
                     new_parts.append(part)
                 else:
                     subparts = re.split(pattern, part)
@@ -233,12 +250,12 @@ class StructuralParser:
         # Если все еще слишком длинные
         final_parts = []
         for part in parts:
-            if len(part) <= self.XTTS_MAX_CHARS:
+            if len(part) <= self._max_chars:
                 final_parts.append(part)
             else:
-                space_pos = part.rfind(' ', self.XTTS_OPTIMAL_MIN, self.XTTS_OPTIMAL_MAX)
+                space_pos = part.rfind(' ', self._optimal_min, self._optimal_max)
                 if space_pos == -1:
-                    space_pos = part.find(' ', self.XTTS_OPTIMAL_MAX)
+                    space_pos = part.find(' ', self._optimal_max)
 
                 if space_pos != -1:
                     final_parts.append(part[:space_pos].strip())

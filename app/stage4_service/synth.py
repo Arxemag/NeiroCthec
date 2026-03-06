@@ -1,4 +1,5 @@
 """Синтезаторы для Stage4: mock (тишина) и внешний HTTP TTS."""
+import base64
 from pathlib import Path
 
 from stage4_service.schemas import TTSRequest, TTSResponse, TTSStatus
@@ -22,6 +23,20 @@ class MockSynthesizer:
             frames = int(sr * duration_sec)
             wav.writeframes(struct.pack("<h", 0) * frames)
         return duration_sec * 1000.0
+
+    def synthesize_batch(
+        self, requests: list[TTSRequest]
+    ) -> list[tuple[bytes, float]]:
+        """Batch: sequential synthesize for mock."""
+        import tempfile
+        results = []
+        for r in requests:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                path = Path(tmp.name)
+            dur = self.synthesize(r, path)
+            results.append((path.read_bytes(), dur))
+            path.unlink(missing_ok=True)
+        return results
 
 
 class ExternalHTTPSynthesizer:
@@ -52,3 +67,32 @@ class ExternalHTTPSynthesizer:
         size = output_path.stat().st_size
         duration_sec = size / (22050 * 2)
         return duration_sec * 1000.0
+
+    def synthesize_batch(
+        self, requests: list[TTSRequest]
+    ) -> list[tuple[bytes, float]]:
+        """Batch synthesis: one HTTP request, returns [(audio_bytes, duration_ms), ...]."""
+        if not requests:
+            return []
+        items = [
+            {
+                "text": r.text,
+                "speaker": r.speaker,
+                "emotion": r.emotion or {},
+                "audio_config": r.audio_config or {},
+            }
+            for r in requests
+        ]
+        resp = self._requests.post(
+            f"{self.base_url}/synthesize-batch",
+            json={"items": items},
+            timeout=self.timeout * max(1, len(requests)),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = []
+        for r in data.get("results", []):
+            content = base64.b64decode(r.get("content_base64", ""))
+            duration_ms = float(r.get("duration_ms", 0))
+            results.append((content, duration_ms))
+        return results

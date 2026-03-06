@@ -41,6 +41,8 @@ _lock = threading.Lock()
 
 # Для обратной совместимости с воркером без user_id/book_id в tts-complete
 _last_leased: dict | None = None
+# Для tts-complete-batch: список последних выданных задач
+_last_leased_batch: list[dict] | None = None
 
 
 def _book_dir(user_id: str, book_id: str) -> Path | None:
@@ -507,6 +509,54 @@ def post_tts_next():
     raise HTTPException(status_code=404, detail="No pending tasks")
 
 
+@internal_router.post("/tts-next-batch")
+def post_tts_next_batch(count: int = 3):
+    """
+    POST /internal/tts-next-batch?count=N — выдать до N задач из очереди (одна книга, один speaker).
+    Возвращает 404, если очереди пусты.
+    """
+    global _last_leased_batch
+    count = max(1, min(count, 16))
+    tasks = []
+    with _lock:
+        while _pending_books and len(tasks) < count:
+            key = _pending_books[0]
+            state = _book_states.get(key)
+            if not state or state.get("stop_requested"):
+                _pending_books.popleft()
+                continue
+            pending = state.get("pending")
+            if not pending:
+                _pending_books.popleft()
+                continue
+            line_id = pending.popleft()
+            lines = state.get("lines") or []
+            task = next((t for t in lines if t["line_id"] == line_id), None)
+            if not task:
+                continue
+            user_id, book_id = key
+            task_id = f"{book_id}_{line_id}"
+            first_voice = tasks[0].get("voice") if tasks else None
+            if tasks and first_voice and task.get("voice") != first_voice:
+                pending.appendleft(line_id)
+                break
+            task_data = {
+                "task_id": task_id,
+                "user_id": user_id,
+                "book_id": book_id,
+                "line_id": line_id,
+                "text": task["text"],
+                "voice": task["voice"],
+                "emotion": task.get("emotion") or {},
+                "audio_config": task.get("audio_config"),
+            }
+            tasks.append(task_data)
+    if not tasks:
+        raise HTTPException(status_code=404, detail="No pending tasks")
+    _last_leased_batch = [{"user_id": t["user_id"], "book_id": t["book_id"], "line_id": t["line_id"]} for t in tasks]
+    return {"tasks": tasks}
+
+
 @internal_router.post("/tts-complete")
 def post_tts_complete(body: dict = Body(default_factory=dict)):
     """
@@ -535,6 +585,41 @@ def post_tts_complete(body: dict = Body(default_factory=dict)):
             raise HTTPException(status_code=404, detail="Book state not found")
         state.setdefault("done", {})[line_id] = audio_path
     return {"line_id": line_id, "audio_path": audio_path, "book_id": book_id}
+
+
+@internal_router.post("/tts-complete-batch")
+def post_tts_complete_batch(body: dict = Body(default_factory=dict)):
+    """
+    POST /internal/tts-complete-batch — отметить несколько строк озвученными.
+    Тело: {"results": [{"line_id": x, "audio_path": "..."}, ...], "user_id": "...", "book_id": "..."}.
+    user_id и book_id обязательны (все задачи из одной книги).
+    """
+    global _last_leased_batch
+    data = body or {}
+    results = data.get("results") or []
+    if not results:
+        raise HTTPException(status_code=400, detail="results array required")
+    user_id = data.get("user_id")
+    book_id = data.get("book_id")
+    if not user_id or not book_id:
+        leased = _last_leased_batch
+        if leased and len(leased) >= len(results):
+            user_id = leased[0].get("user_id")
+            book_id = leased[0].get("book_id")
+        if not user_id or not book_id:
+            raise HTTPException(status_code=400, detail="user_id and book_id required")
+    key = (user_id, book_id)
+    with _lock:
+        state = _book_states.get(key)
+        if not state:
+            raise HTTPException(status_code=404, detail="Book state not found")
+        for r in results:
+            lid = r.get("line_id")
+            path = r.get("audio_path")
+            if lid is not None and path:
+                state.setdefault("done", {})[lid] = path
+    _last_leased_batch = None
+    return {"processed": len(results), "book_id": book_id}
 
 
 @internal_router.post("/stop-book-stage4")

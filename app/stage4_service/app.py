@@ -89,7 +89,10 @@ def process_next_task():
 
 
 def _process_one_task() -> bool:
-    """Забрать одну задачу из core, озвучить, отправить tts-complete. Возвращает True если задача была."""
+    """Забрать задачу(и) из core, озвучить, отправить tts-complete. Возвращает True если была задача."""
+    batch_size = int(os.getenv("STAGE4_BATCH_SIZE", "1"))
+    if batch_size > 1:
+        return _process_batch_tasks(batch_size)
     try:
         lease = requests.post(f"{core_internal_url}/tts-next", timeout=20)
         if lease.status_code == 404:
@@ -119,6 +122,64 @@ def _process_one_task() -> bool:
                 "book_id": task["book_id"],
                 "line_id": task["line_id"],
                 "audio_path": result.audio_uri,
+            },
+            timeout=20,
+        ).raise_for_status()
+    except Exception:
+        pass
+    return True
+
+
+def _process_batch_tasks(batch_size: int) -> bool:
+    """Забрать batch задач, озвучить, отправить tts-complete-batch."""
+    try:
+        lease = requests.post(
+            f"{core_internal_url}/tts-next-batch",
+            params={"count": batch_size},
+            timeout=20,
+        )
+        if lease.status_code == 404:
+            return False
+        lease.raise_for_status()
+        data = lease.json()
+        tasks = data.get("tasks") or []
+    except Exception:
+        return False
+    if not tasks:
+        return False
+    reqs = [
+        TTSRequest(
+            task_id=t["task_id"],
+            user_id=t["user_id"],
+            book_id=t["book_id"],
+            line_id=t["line_id"],
+            text=t["text"],
+            speaker=t["voice"],
+            emotion=t.get("emotion"),
+            audio_config=t.get("audio_config"),
+        )
+        for t in tasks
+    ]
+    try:
+        batch_results = synth.synthesize_batch(reqs)
+    except Exception:
+        return True  # задачи уже забраны
+    if len(batch_results) != len(tasks):
+        return True
+    results = []
+    for (t, (audio_bytes, _)) in zip(tasks, batch_results):
+        target = storage.path_for_line(t["user_id"], t["book_id"], t["line_id"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(audio_bytes)
+        audio_uri = storage.uri_for_line(t["user_id"], t["book_id"], t["line_id"])
+        results.append({"line_id": t["line_id"], "audio_path": audio_uri})
+    try:
+        requests.post(
+            f"{core_internal_url}/tts-complete-batch",
+            json={
+                "user_id": tasks[0]["user_id"],
+                "book_id": tasks[0]["book_id"],
+                "results": results,
             },
             timeout=20,
         ).raise_for_status()

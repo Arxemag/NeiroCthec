@@ -5,6 +5,7 @@ Standalone TTS Engine — движок синтеза речи на Qwen3-TTS.
 """
 from __future__ import annotations
 
+import base64
 import logging
 import math
 import os
@@ -186,6 +187,28 @@ class VoiceInfo(BaseModel):
     source: str  # builtin | config | discovered
 
 
+class SynthesizeBatchItem(BaseModel):
+    text: str = Field(min_length=1)
+    speaker: str = "narrator"
+    emotion: EmotionPayload | None = None
+    language: str | None = None
+    voice_sample: str | None = None
+    audio_config: dict | None = None
+
+
+class SynthesizeBatchRequest(BaseModel):
+    items: list[SynthesizeBatchItem] = Field(min_length=1, max_length=16)
+
+
+class SynthesizeBatchResult(BaseModel):
+    content_base64: str
+    duration_ms: int
+
+
+class SynthesizeBatchResponse(BaseModel):
+    results: list[SynthesizeBatchResult]
+
+
 # ---------------------------------------------------------------------------
 # Qwen3-TTS initialization (русский + CUDA/ROCm)
 # ---------------------------------------------------------------------------
@@ -261,6 +284,9 @@ def _init_qwen3() -> None:
                 dtype=dtype,
                 attn_implementation=attn,
             )
+            if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "true").lower() in ("1", "true", "yes"):
+                _QWEN3 = torch.compile(_QWEN3, mode="reduce-overhead")
+                logger.info("Qwen3-TTS torch.compile enabled")
             _QWEN3_ERROR = None
             _QWEN3_ACTIVE_DEVICE = "cuda" if use_gpu else "cpu"
             logger.info("Qwen3-TTS init OK: model=%s device=%s attn=%s", _QWEN3_MODEL_NAME, _QWEN3_ACTIVE_DEVICE, attn)
@@ -283,6 +309,8 @@ def _init_qwen3() -> None:
                 dtype=dtype,
                 attn_implementation="sdpa",
             )
+            if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "true").lower() in ("1", "true", "yes"):
+                _QWEN3 = torch.compile(_QWEN3, mode="reduce-overhead")
             _QWEN3_ERROR = None
             _QWEN3_ACTIVE_DEVICE = "cpu"
             logger.warning("Qwen3-TTS fallback to CPU after GPU init failure")
@@ -315,6 +343,8 @@ def _init_qwen3_base() -> bool:
             dtype=dtype,
             attn_implementation="sdpa",
         )
+        if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "true").lower() in ("1", "true", "yes"):
+            _QWEN3_BASE = torch.compile(_QWEN3_BASE, mode="reduce-overhead")
         _QWEN3_BASE_ERROR = None
         logger.info("Qwen3-TTS Base (voice clone) loaded: %s", _QWEN3_BASE_MODEL_NAME)
         return True
@@ -803,8 +833,8 @@ def _voice_design_synthesize(request: SynthesizeRequest) -> Response:
     )
 
 
-def _qwen3_synthesize(request: SynthesizeRequest) -> Response:
-    """Синтез: при наличии образца голоса в storage/voices — Base (clone), иначе CustomVoice."""
+def _qwen3_synthesize_internal(request: SynthesizeRequest) -> tuple[bytes, int]:
+    """Core synthesis logic. Returns (content_bytes, duration_ms)."""
     if _QWEN3 is None:
         _init_qwen3()
     if _QWEN3 is None:
@@ -884,23 +914,55 @@ def _qwen3_synthesize(request: SynthesizeRequest) -> Response:
 
     with wave.open(BytesIO(content), "rb") as wf:
         duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+    return content, duration_ms
 
+
+def _qwen3_synthesize(request: SynthesizeRequest) -> Response:
+    """Синтез: при наличии образца голоса в storage/voices — Base (clone), иначе CustomVoice."""
+    content, duration_ms = _qwen3_synthesize_internal(request)
     headers = {
         "x-duration-ms": str(duration_ms),
         "x-tts-backend": "qwen3",
-        "x-tts-language": language,
-        "x-tts-voice-source": "clone" if use_voice_clone else "custom",
+        "x-tts-language": _resolve_language(request),
+        "x-tts-voice-source": "clone",
     }
-    if not use_voice_clone:
-        headers["x-tts-speaker"] = _resolve_qwen3_speaker(_normalize_speaker_label(request.speaker))
-    elif speaker_wav_path:
+    speaker_wav_path = _resolve_coqui_speaker_wav(request)
+    if speaker_wav_path and Path(speaker_wav_path).exists():
+        headers["x-tts-voice-source"] = "clone"
         headers["x-tts-speaker-wav"] = Path(speaker_wav_path).name
+    else:
+        headers["x-tts-voice-source"] = "custom"
+        headers["x-tts-speaker"] = _resolve_qwen3_speaker(_normalize_speaker_label(request.speaker))
     if _QWEN3_ACTIVE_DEVICE:
         headers["x-tts-device"] = _QWEN3_ACTIVE_DEVICE
     v = _gpu_vendor()
     if v:
         headers["x-tts-gpu-vendor"] = v
     return Response(content=content, media_type="audio/wav", headers=headers)
+
+
+@app.post("/synthesize-batch")
+def synthesize_batch(request: SynthesizeBatchRequest) -> SynthesizeBatchResponse:
+    """Batch synthesis: sequential calls, one HTTP request. Reduces overhead."""
+    if _require_gpu() and not _gpu_runtime_status()[0]:
+        raise HTTPException(status_code=503, detail="GPU required but not available")
+    if _BACKEND not in ("qwen3", "auto") or _QWEN3 is None:
+        _init_qwen3()
+    if _QWEN3 is None:
+        raise HTTPException(status_code=503, detail=f"Qwen3-TTS unavailable: {_QWEN3_ERROR}")
+    results = []
+    for item in request.items:
+        req = SynthesizeRequest(
+            text=item.text,
+            speaker=item.speaker,
+            emotion=item.emotion or EmotionPayload(),
+            language=item.language,
+            voice_sample=item.voice_sample,
+            audio_config=item.audio_config,
+        )
+        content, duration_ms = _qwen3_synthesize_internal(req)
+        results.append(SynthesizeBatchResult(content_base64=base64.b64encode(content).decode("ascii"), duration_ms=duration_ms))
+    return SynthesizeBatchResponse(results=results)
 
 
 @app.post("/synthesize")
