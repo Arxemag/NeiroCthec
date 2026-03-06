@@ -1,12 +1,65 @@
 # core/pipeline/stage2_speaker.py
+"""
+Stage 2 — SpeakerResolver с модульной архитектурой.
+Интегрирует stage2_0 - stage2_4 для точного определения пола спикера.
+"""
 import re
 import logging
 import builtins
-from typing import Optional, List, Dict
-from collections import deque, defaultdict
+from typing import Optional, List, Dict, Tuple
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 from core.models import Line, UserBookFormat, Remark
+
+# Безопасный импорт модулей Stage 2.x
+try:
+    from .stage2_0_verb_dictionary import (
+        VerbDictionary,
+        BookVerbAnalyzer,
+        get_global_verb_dictionary,
+        update_global_dictionary,
+        analyze_context
+    )
+except ImportError:
+    VerbDictionary = None
+    BookVerbAnalyzer = None
+    get_global_verb_dictionary = lambda: None
+    update_global_dictionary = lambda x: None
+    analyze_context = lambda t, d: ("unknown", [])
+
+try:
+    from .stage2_1_evidence_collectors import (
+        PatternEvidenceCollector,
+        PronounEvidenceCollector,
+        NameEvidenceCollector,
+        VerbEndingEvidenceCollector,
+        ExplicitPronounVerbCollector,
+        Evidence,
+    )
+except ImportError:
+    PatternEvidenceCollector = None
+    PronounEvidenceCollector = None
+    NameEvidenceCollector = None
+    VerbEndingEvidenceCollector = None
+    ExplicitPronounVerbCollector = None
+    Evidence = None
+
+try:
+    from .stage2_2_evidence_resolver import EvidenceResolver
+except ImportError:
+    EvidenceResolver = None
+
+try:
+    from .stage2_3_context_manager import ContextManager
+except ImportError:
+    ContextManager = None
+
+try:
+    from .stage2_4_fallback_strategies import ContextAwareFallback, StatisticalFallback
+except ImportError:
+    ContextAwareFallback = None
+    StatisticalFallback = None
 
 
 def _safe_print(*args, **kwargs):
@@ -20,36 +73,25 @@ def _safe_print(*args, **kwargs):
 @dataclass
 class SpeakerConfig:
     """Конфигурация резолвера спикеров"""
-    # Основные настройки
-    use_simple_rules: bool = True  # ВКЛЮЧАЕМ простые правила
-    use_natasha: bool = False  # ОТКЛЮЧАЕМ Natasha пока что
-    fallback_to_narrator: bool = False  # НЕ фолбэкаем на narrator в диалогах
-
-    # Правила для простого определения
-    explicit_patterns: Dict[str, str] = field(default_factory=lambda: {
-        r'доложил[а]?\s+он[ауе]?': 'female',
-        r'сказал[а]?\s+он[ауе]?': 'male',
-        r'ответил[а]?\s+он[ауе]?': 'male',
-        r'произн[её]с[ла]?\s+он[ауе]?': 'male',
-        r'промолвил[а]?\s+он[ауе]?': 'male',
-        r'воскликнул[а]?\s+он[ауе]?': 'male',
-        r'заметил[а]?\s+он[ауе]?': 'male',
-        r'повторил[а]?\s+он[ауе]?': 'male',
-        r'добавил[а]?\s+он[ауе]?': 'male',
-        r'спросил[а]?\s+он[ауе]?': 'male',
-        r'крикнул[а]?\s+он[ауе]?': 'male',
-        r'прошептал[а]?\s+он[ауе]?': 'male',
-        r'подумал[а]?\s+он[ауе]?': 'male',
-        r'буркнул[а]?\s+он[ауе]?': 'male',
-    })
-
-    # Логирование
+    confidence_threshold: float = 0.3
+    use_narrator_fallback: bool = False
+    debug_detailed: bool = False
+    analyze_verbs: bool = True
     log_level: int = logging.INFO
 
-    # Словари имён
+    female_verbs: set = field(default_factory=lambda: {
+        "сказала", "доложила", "сообщила", "спросила", "ответила", "закивала",
+        "улыбнулась", "кивнула", "прочистив", "начала", "ответила"
+    })
+    male_verbs: set = field(default_factory=lambda: {
+        "сказал", "доложил", "сообщил", "спросил", "ответил", "проговорил",
+        "принял", "догадался", "согласился", "решил", "послышался"
+    })
+
     female_names: set = field(default_factory=lambda: {
         "анна", "мария", "екатерина", "ольга", "дина", "наталья", "елена",
-        "светлана", "ирина", "юлия", "татьяна", "людмила"
+        "светлана", "ирина", "юлия", "татьяна", "людмила", "лора", "девушка",
+        "александра", "виктория", "дарья", "ксения", "анастасия", "полина"
     })
 
     male_names: set = field(default_factory=lambda: {
@@ -58,44 +100,91 @@ class SpeakerConfig:
     })
 
 
+# Веса для разных типов доказательств
+WEIGHTS = {
+    'explicit_pronoun_verb': 3.0,
+    'verb_endings': 2.5,
+    'static_verbs': 2.0,
+    'context_name_indicators': 1.8,
+    'dynamic_verbs': 1.5,
+    'pronoun_ratio': 1.2,
+    'names': 1.0,
+    'dialogue_context': 0.8,
+    'context_indicators': 0.6,
+    'book_statistics': 0.3,
+}
+
+
 class SpeakerResolver:
     """
-    Stage 2 — SpeakerResolver
-    🔥 ИСПРАВЛЕН: Работает с обновлённой моделью, использует простые правила
+    Stage 2 — SpeakerResolver с модульной архитектурой.
+    Использует систему весов и модули 2.0-2.4 для точного определения.
     """
 
     def __init__(self, config: Optional[SpeakerConfig] = None):
         self.config = config or SpeakerConfig()
-
-        # Контекст для сегментов
-        self.speaker_context: Dict[int, str] = {}  # base_line_id -> speaker
-        self.last_dialogue_speaker: Optional[str] = None
-
-        # Статистика
-        self.stats = defaultdict(int)
-
-        # Логирование
-        logging.basicConfig(level=self.config.log_level)
         self.logger = logging.getLogger(__name__)
 
-        # Для статистики
+        # Модули Stage 2.x
+        self.verb_analyzer = BookVerbAnalyzer() if BookVerbAnalyzer else None
+        self.verb_dictionary = get_global_verb_dictionary() if get_global_verb_dictionary else None
+        self.context_manager = ContextManager() if ContextManager else None
+        self.evidence_resolver = EvidenceResolver(
+            confidence_threshold=self.config.confidence_threshold
+        ) if EvidenceResolver else None
+        self.fallback_strategy = ContextAwareFallback(
+            use_narrator_fallback=self.config.use_narrator_fallback
+        ) if ContextAwareFallback else None
+        self.stats_fallback = StatisticalFallback() if StatisticalFallback else None
+
+        # Коллекторы доказательств
+        self.evidence_collectors = []
+        if ExplicitPronounVerbCollector:
+            self.evidence_collectors.append(ExplicitPronounVerbCollector(WEIGHTS['explicit_pronoun_verb']))
+        if VerbEndingEvidenceCollector:
+            self.evidence_collectors.append(VerbEndingEvidenceCollector(WEIGHTS['verb_endings']))
+        if PatternEvidenceCollector:
+            self.evidence_collectors.append(PatternEvidenceCollector())
+        if PronounEvidenceCollector:
+            self.evidence_collectors.append(PronounEvidenceCollector(WEIGHTS))
+        if NameEvidenceCollector:
+            self.evidence_collectors.append(NameEvidenceCollector(
+                self.config.female_names, self.config.male_names, WEIGHTS['names']
+            ))
+
+        # Локальный кэш и статистика
+        self.segment_speakers: Dict[int, str] = {}
+        self.last_speaker: Optional[str] = None
+        self.stats = defaultdict(int)
+        self.book_gender_stats = {'male': 0, 'female': 0, 'total': 0}
         self._last_ubf = None
 
     def process(self, ubf: UserBookFormat) -> UserBookFormat:
-        """Обработка всех строк"""
+        """Основной метод обработки"""
         self._last_ubf = ubf
         self.stats['total_lines'] = len(ubf.lines)
 
-        _safe_print(f"\nStage 2: Определение спикеров")
+        _safe_print(f"\nStage 2: Определение спикеров (модульная версия)")
 
+        # Анализ глаголов книги
+        if self.config.analyze_verbs and self.verb_analyzer:
+            try:
+                book_dictionary = self.verb_analyzer.analyze_book(ubf.lines)
+                if update_global_dictionary:
+                    update_global_dictionary(book_dictionary)
+                self.verb_dictionary = get_global_verb_dictionary()
+            except Exception as e:
+                _safe_print(f"  Предупреждение: ошибка анализа глаголов: {e}")
+
+        # Обработка строк
         for line in sorted(ubf.lines, key=lambda l: l.idx):
-            self._resolve_line(line)
+            self._process_line(line)
 
         self._log_statistics()
         return ubf
 
-    def _resolve_line(self, line: Line) -> None:
-        """Определение спикера для строки"""
+    def _process_line(self, line: Line):
+        """Обработка одной строки"""
         if line.type != "dialogue":
             line.speaker = "narrator"
             self.stats['narrator_lines'] += 1
@@ -103,129 +192,162 @@ class SpeakerResolver:
 
         self.stats['dialogue_lines'] += 1
 
-        # 🔥 1. Если это сегмент, проверяем контекст
-        if line.is_segment and line.base_line_id is not None:
-            if line.base_line_id in self.speaker_context:
-                line.speaker = self.speaker_context[line.base_line_id]
+        # 1. Проверяем кэш контекста (для сегментов)
+        if self.context_manager:
+            context_speaker = self.context_manager.get_segment_speaker(line)
+            if context_speaker:
+                line.speaker = context_speaker
                 self.stats['from_context'] += 1
-                self.logger.debug(f"Line {line.idx}: speaker from context = {line.speaker}")
+                self.last_speaker = context_speaker
                 return
 
-        # 🔥 2. Простой анализ текста
-        speaker = self._analyze_text_simple(line)
+        if line.is_segment and line.base_line_id is not None:
+            if line.base_line_id in self.segment_speakers:
+                line.speaker = self.segment_speakers[line.base_line_id]
+                self.stats['from_context'] += 1
+                self.last_speaker = line.speaker
+                return
 
-        if speaker != "unknown":
+        # 2. Сбор и анализ доказательств
+        speaker, confidence, reasoning = self._analyze_with_evidences(line)
+
+        if speaker != "unknown" and confidence >= self.config.confidence_threshold:
             line.speaker = speaker
             self.stats['resolved'] += 1
+            self.last_speaker = speaker
 
-            # Сохраняем в контекст для сегментов
-            if line.is_segment and line.base_line_id is not None:
-                self.speaker_context[line.base_line_id] = speaker
-
-            self.last_dialogue_speaker = speaker
-            self.logger.debug(f"Line {line.idx}: resolved = {speaker}")
-            return
-
-        # 🔥 3. Фолбэк: если диалог и не определили, ставим male/female по контексту
-        if self.last_dialogue_speaker and self.last_dialogue_speaker != "narrator":
-            line.speaker = self.last_dialogue_speaker
-            self.stats['fallback_context'] += 1
-        elif not self.config.fallback_to_narrator:
-            # Если диалог - пробуем male, а не narrator
-            line.speaker = "male"
-            self.stats['fallback_male'] += 1
+            if self.config.debug_detailed:
+                _safe_print(f"  Line {line.idx}: {speaker} (conf={confidence:.2f})")
         else:
-            line.speaker = "narrator"
-            self.stats['fallback_narrator'] += 1
+            # 3. Фолбэк
+            fallback_speaker, fallback_reason = self._smart_fallback(line)
+            line.speaker = fallback_speaker
+            self.stats['fallback'] += 1
+            self.last_speaker = fallback_speaker
 
-        # Сохраняем в контекст
+            if self.config.debug_detailed:
+                _safe_print(f"  Line {line.idx}: {fallback_speaker} (fallback: {fallback_reason})")
+
+        # Сохраняем в кэш
         if line.is_segment and line.base_line_id is not None:
-            self.speaker_context[line.base_line_id] = line.speaker
+            self.segment_speakers[line.base_line_id] = line.speaker
 
-        self.last_dialogue_speaker = line.speaker
+        if self.context_manager:
+            self.context_manager.set_segment_speaker(line, line.speaker)
+            self.context_manager.update_dialogue_sequence(line.speaker)
 
-    def _analyze_text_simple(self, line: Line) -> str:
-        """
-        🔥 ПРОСТОЙ И ЭФФЕКТИВНЫЙ АНАЛИЗ ТЕКСТА
-        Ищет явные указания на пол в оригинальном тексте и ремарках
-        """
-        # Собираем весь текст для анализа
-        text_to_analyze = line.original.lower()
+        if self.stats_fallback and line.speaker in ('male', 'female'):
+            self.stats_fallback.update_stats(line.speaker)
 
-        # Добавляем ремарки
-        if line.remarks:
-            for remark in line.remarks:
-                text_to_analyze += " " + remark.text.lower()
+    def _analyze_with_evidences(self, line: Line) -> Tuple[str, float, List[str]]:
+        """Анализ с использованием коллекторов доказательств"""
+        all_evidences = []
+        reasoning = []
 
-        # 1. Ищем явные паттерны из конфига
-        for pattern, gender in self.config.explicit_patterns.items():
-            if re.search(pattern, text_to_analyze, re.IGNORECASE):
-                self.logger.debug(f"Found pattern '{pattern}' -> {gender}")
-                return gender
+        # Собираем доказательства от всех коллекторов
+        for collector in self.evidence_collectors:
+            try:
+                evidences = collector.collect(line)
+                all_evidences.extend(evidences)
+            except Exception:
+                continue
 
-        # 2. Простые ключевые слова (более надёжные)
-        simple_patterns = [
-            # Женские паттерны
-            (r'\bдоложила\s+(?:ей?|мне|нам|ему|ей|им|ей)\b', 'female'),
-            (r'\b(?:ей?|мне|нам|ему|ей|им|ей)\s+доложила\b', 'female'),
-            (r'\bсказала\s+(?:ей?|мне|нам|ему|ей|им|ей)\b', 'female'),
-            (r'\b(?:ей?|мне|нам|ему|ей|им|ей)\s+сказала\b', 'female'),
-            (r'\bответила\s+(?:ей?|мне|нам|ему|ей|им|ей)\b', 'female'),
+        # Добавляем доказательства из динамического словаря
+        if self.verb_dictionary:
+            text = line.original.lower()
+            for verb in getattr(self.verb_dictionary, 'male_verbs', set()):
+                if re.search(rf'\b{re.escape(verb)}\b', text):
+                    if Evidence:
+                        all_evidences.append(Evidence(
+                            gender='male',
+                            weight=WEIGHTS['dynamic_verbs'],
+                            source='dynamic_verb',
+                            details=f"Словарь: '{verb}'"
+                        ))
 
-            # Мужские паттерны
-            (r'\bдоложил\s+(?:ей?|мне|нам|ему|ей|им|ей)\b', 'male'),
-            (r'\b(?:ей?|мне|нам|ему|ей|им|ей)\s+доложил\b', 'male'),
-            (r'\bсказал\s+(?:ей?|мне|нам|ему|ей|им|ей)\b', 'male'),
-            (r'\b(?:ей?|мне|нам|ему|ей|им|ей)\s+сказал\b', 'male'),
-            (r'\bответил\s+(?:ей?|мне|нам|ему|ей|им|ей)\b', 'male'),
+            for verb in getattr(self.verb_dictionary, 'female_verbs', set()):
+                if re.search(rf'\b{re.escape(verb)}\b', text):
+                    if Evidence:
+                        all_evidences.append(Evidence(
+                            gender='female',
+                            weight=WEIGHTS['dynamic_verbs'],
+                            source='dynamic_verb',
+                            details=f"Словарь: '{verb}'"
+                        ))
 
-            # С местоимениями
-            (r'\bдоложила\s+она\b', 'female'),
-            (r'\bона\s+доложила\b', 'female'),
-            (r'\bсказала\s+она\b', 'female'),
-            (r'\bона\s+сказала\b', 'female'),
+        # Добавляем контекст чередования
+        if self.context_manager and self.last_speaker:
+            expected = self.context_manager.get_expected_speaker_by_alternation()
+            if expected and Evidence:
+                all_evidences.append(Evidence(
+                    gender=expected,
+                    weight=WEIGHTS['dialogue_context'],
+                    source='alternation',
+                    details=f"Чередование (пред.={self.last_speaker})"
+                ))
 
-            (r'\bдоложил\s+он\b', 'male'),
-            (r'\bон\s+доложил\b', 'male'),
-            (r'\bсказал\s+он\b', 'male'),
-            (r'\bон\s+сказал\b', 'male'),
-        ]
+        # Резолвим доказательства
+        if self.evidence_resolver and all_evidences:
+            result = self.evidence_resolver.resolve(all_evidences)
+            reasoning = result.reasoning
+            return result.speaker, result.confidence, reasoning
 
-        for pattern, gender in simple_patterns:
-            if re.search(pattern, text_to_analyze, re.IGNORECASE):
-                self.logger.debug(f"Found simple pattern '{pattern}' -> {gender}")
-                return gender
+        # Fallback на простой подсчёт
+        return self._simple_score_analysis(all_evidences)
 
-        # 3. Подсчёт местоимений
-        male_pronouns = len(re.findall(r'\bон[ауе]?\b', text_to_analyze))
-        female_pronouns = len(re.findall(r'\bона\b', text_to_analyze))
+    def _simple_score_analysis(self, evidences: List) -> Tuple[str, float, List[str]]:
+        """Простой подсчёт баллов если резолвер недоступен"""
+        scores = {'male': 0.0, 'female': 0.0}
+        reasoning = []
 
-        if male_pronouns > female_pronouns * 2:
-            return "male"
-        elif female_pronouns > male_pronouns * 2:
-            return "female"
+        for ev in evidences:
+            if hasattr(ev, 'gender') and ev.gender in scores:
+                scores[ev.gender] += getattr(ev, 'weight', 1.0)
 
-        # 4. Имена в тексте
-        if self._contains_female_name(text_to_analyze):
-            return "female"
-        if self._contains_male_name(text_to_analyze):
-            return "male"
+        total = scores['male'] + scores['female']
+        if total == 0:
+            return 'unknown', 0.0, ['Нет доказательств']
 
-        return "unknown"
+        if scores['male'] > scores['female']:
+            conf = (scores['male'] - scores['female']) / total
+            reasoning.append(f"male={scores['male']:.1f} vs female={scores['female']:.1f}")
+            return 'male', conf, reasoning
+        elif scores['female'] > scores['male']:
+            conf = (scores['female'] - scores['male']) / total
+            reasoning.append(f"female={scores['female']:.1f} vs male={scores['male']:.1f}")
+            return 'female', conf, reasoning
 
-    def _contains_female_name(self, text: str) -> bool:
-        """Проверяет наличие женских имён в тексте"""
-        for name in self.config.female_names:
-            if re.search(rf'\b{name}\b', text, re.IGNORECASE):
-                return True
-        return False
+        return 'unknown', 0.0, ['Ничья']
 
-    def _contains_male_name(self, text: str) -> bool:
-        """Проверяет наличие мужских имён в тексте"""
-        for name in self.config.male_names:
-            if re.search(rf'\b{name}\b', text, re.IGNORECASE):
-                return True
-        return False
+    def _smart_fallback(self, line: Line) -> Tuple[str, str]:
+        """Умный фолбэк с использованием стратегий"""
+        # Используем модуль фолбэка если доступен
+        if self.fallback_strategy and self.context_manager:
+            doc_stats = None
+            if self.stats_fallback:
+                doc_stats = self.stats_fallback.get_ratio()
+
+            result = self.fallback_strategy.get_fallback_speaker(
+                line, self.context_manager, doc_stats
+            )
+            if result:
+                return result
+
+        # Простой фолбэк
+        text_lower = line.original.lower()
+        male_verbs = len(re.findall(r'\b\S+л\b', text_lower))
+        female_verbs = len(re.findall(r'\b\S+ла\b', text_lower))
+
+        if male_verbs > female_verbs:
+            return "male", f"глаголы м.р. ({male_verbs} vs {female_verbs})"
+        elif female_verbs > male_verbs:
+            return "female", f"глаголы ж.р. ({female_verbs} vs {male_verbs})"
+
+        if self.last_speaker and self.last_speaker != "narrator":
+            opposite = "female" if self.last_speaker == "male" else "male"
+            return opposite, "чередование"
+
+        return "male", "умолчание"
 
     def _log_statistics(self):
         """Логирование статистики"""
@@ -236,13 +358,10 @@ class SpeakerResolver:
         _safe_print(f"  Диалоговых: {dialogue}")
 
         if dialogue > 0:
-            _safe_print(f"  Успешно определено: {self.stats.get('resolved', 0)}")
+            _safe_print(f"  Определено аналитикой: {self.stats.get('resolved', 0)}")
             _safe_print(f"  Из контекста: {self.stats.get('from_context', 0)}")
-            _safe_print(f"  Фолбэк по контексту: {self.stats.get('fallback_context', 0)}")
-            _safe_print(f"  Фолбэк male: {self.stats.get('fallback_male', 0)}")
-            _safe_print(f"  Фолбэк narrator: {self.stats.get('fallback_narrator', 0)}")
+            _safe_print(f"  Фолбэк: {self.stats.get('fallback', 0)}")
 
-        # Распределение спикеров
         speakers = {}
         if self._last_ubf:
             for line in self._last_ubf.lines:
