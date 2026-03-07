@@ -62,6 +62,9 @@ services:
       - ./app:/app
       - ./app/storage:/app/storage
     command: ["python", "-m", "stage4_service.app"]
+    deploy:
+      replicas: 2
+      # Для большего числа воркеров: docker compose up -d --scale stage4=4
 
   # --- TTS Qwen3 (NVIDIA). Не поднимать на AMD — там TTS локально на 8020. ---
   tts:
@@ -109,6 +112,7 @@ services:
       - DATABASE_URL=postgresql://neuro:neuro@postgres:5432/neurochtec?schema=public
       - S3_ENDPOINT=http://minio:9000
       - REDIS_URL=redis://redis:6379
+      - APP_API_URL=http://core:8000
     volumes:
       - ./frontend:/usr/src/app
       - frontend_node_modules:/usr/src/app/node_modules

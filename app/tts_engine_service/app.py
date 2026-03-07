@@ -6,6 +6,7 @@ Standalone TTS Engine — движок синтеза речи на Qwen3-TTS.
 from __future__ import annotations
 
 import base64
+from collections import defaultdict
 import logging
 import math
 import os
@@ -27,16 +28,22 @@ from pydantic import BaseModel, Field
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Загрузка Qwen3-TTS в фоне — сервер сразу принимает соединения."""
-    global _QWEN3_LOADING
-    _QWEN3_LOADING = True
+    """Загрузка Base 4-bit модели в фоне — сервер сразу принимает соединения."""
+    global _QWEN3_BASE_LOADING
+    _QWEN3_BASE_LOADING = True
 
     def _load():
-        global _QWEN3_LOADING
+        global _QWEN3_BASE_LOADING
         try:
-            _init_qwen3()
+            _init_qwen3_base()
+            if _QWEN3_BASE is not None:
+                logger.info("Qwen3-TTS Base загружена, устройство: %s", _QWEN3_BASE_DEVICE)
+            elif _QWEN3_BASE_ERROR:
+                logger.error("Qwen3-TTS Base не загружена: %s. Проверьте GET /health для деталей.", _QWEN3_BASE_ERROR)
+        except Exception as e:
+            logger.exception("Ошибка при загрузке Qwen3-TTS в фоне: %s", e)
         finally:
-            _QWEN3_LOADING = False
+            _QWEN3_BASE_LOADING = False
 
     th = threading.Thread(target=_load, daemon=True)
     th.start()
@@ -56,15 +63,12 @@ logging.getLogger("matplotlib").setLevel(logging.WARNING)
 # ---------------------------------------------------------------------------
 
 _BACKEND = os.getenv("TTS_BACKEND", "qwen3").strip().lower()
-_QWEN3: Any = None
-_QWEN3_ERROR: str | None = None
-_QWEN3_ACTIVE_DEVICE: str | None = None
-_QWEN3_LOADING: bool = False
-_QWEN3_MODEL_NAME = os.getenv("TTS_QWEN3_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
-# Base model для клонирования голоса по образцу (storage/voices/*.wav)
+# Единственная модель — Base 4-bit для клонирования голоса по WAV
 _QWEN3_BASE: Any = None
 _QWEN3_BASE_ERROR: str | None = None
-_QWEN3_BASE_MODEL_NAME = os.getenv("TTS_QWEN3_BASE_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+_QWEN3_BASE_LOADING: bool = False
+_QWEN3_BASE_MODEL_NAME = os.getenv("TTS_QWEN3_BASE_MODEL", "divyajot5005/Qwen3-TTS-12Hz-1.7B-Base-BNB-4bit")
+_QWEN3_BASE_DEVICE: str | None = None  # "cuda" or "cpu" after load
 
 # Кэш voice_clone_prompt по пути к WAV — не пересчитываем фичи при каждом запросе
 _VOICE_CLONE_PROMPT_CACHE: dict[str, Any] = {}
@@ -210,132 +214,13 @@ class SynthesizeBatchResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Qwen3-TTS initialization (русский + CUDA/ROCm)
+# Qwen3-TTS Base 4-bit (единственная модель — voice clone по WAV)
 # ---------------------------------------------------------------------------
-
-# Список спикеров CustomVoice: narrator/male/female маппим на них
-_QWEN3_SPEAKER_MAP = {
-    "narrator": "Ryan",
-    "male": "Aiden",
-    "female": "Serena",
-    "default": "Ryan",
-    "main": "Ryan",
-    "storyteller": "Ryan",
-    "woman": "Serena",
-    "girl": "Serena",
-    "man": "Aiden",
-    "boy": "Aiden",
-    "vivian": "Vivian",
-    "serena": "Serena",
-    "uncle_fu": "Uncle_Fu",
-    "dylan": "Dylan",
-    "eric": "Eric",
-    "ryan": "Ryan",
-    "aiden": "Aiden",
-    "ono_anna": "Ono_Anna",
-    "sohee": "Sohee",
-}
-
-
-def _resolve_qwen3_speaker(speaker_label: str) -> str:
-    """Маппинг нашего speaker id на имя спикера Qwen3 CustomVoice."""
-    raw = (speaker_label or "").strip().lower().replace(" ", "_")
-    if raw in _QWEN3_SPEAKER_MAP:
-        return _QWEN3_SPEAKER_MAP[raw]
-    # Допустимые имена Qwen3 как есть (Vivian, Ryan, ...)
-    for qwen_name in ("Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee"):
-        if raw == qwen_name.lower():
-            return qwen_name
-    return "Ryan"
-
-
-def _init_qwen3() -> None:
-    global _QWEN3, _QWEN3_ERROR, _QWEN3_ACTIVE_DEVICE
-    if _BACKEND not in {"qwen3", "auto"}:
-        return
-
-    try:
-        import torch  # type: ignore
-        from qwen_tts import Qwen3TTSModel  # type: ignore
-    except Exception as exc:
-        _QWEN3 = None
-        _QWEN3_ERROR = f"Failed to import qwen_tts: {exc}"
-        _QWEN3_ACTIVE_DEVICE = None
-        logger.exception("Qwen3-TTS import failed")
-        return
-
-    cuda_ok, cuda_name = _gpu_runtime_status()
-    use_gpu = _device_preference() == "cuda"
-    # Используем "auto" для автоматического размещения на доступных устройствах
-    device_map = "auto" if use_gpu else "cpu"
-    if cuda_ok:
-        logger.info("GPU detected: %s (PyTorch CUDA/ROCm). TTS_DEVICE=%s -> use_gpu=%s", cuda_name, os.getenv("TTS_DEVICE", "auto"), use_gpu)
-    else:
-        logger.info("GPU not available (torch.cuda.is_available()=False). Install PyTorch with CUDA or ROCm for AMD. Using CPU.")
-    dtype = getattr(torch, "bfloat16", torch.float16)
-    # На AMD ROCm flash_attention_2 недоступен — используем sdpa
-    # TTS_ATTN_IMPL: sdpa, eager — или auto для автовыбора (flash_attention_2 отключен для совместимости)
-    attn_env = os.getenv("TTS_ATTN_IMPL", "sdpa").strip().lower()
-    if attn_env == "auto":
-        attn_candidates = ["sdpa", "eager"]
-    else:
-        attn_candidates = [attn_env]
-    last_exc: Exception | None = None
-
-    for attn in attn_candidates:
-        try:
-            _QWEN3 = Qwen3TTSModel.from_pretrained(
-                _QWEN3_MODEL_NAME,
-                device_map=device_map,
-                dtype=dtype,
-                attn_implementation=attn,
-            )
-            if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "false").lower() in ("1", "true", "yes"):
-                try:
-                    _QWEN3 = torch.compile(_QWEN3, mode="reduce-overhead")
-                    logger.info("Qwen3-TTS torch.compile enabled")
-                except Exception as compile_exc:
-                    logger.warning("torch.compile skipped: %s", compile_exc)
-            _QWEN3_ERROR = None
-            _QWEN3_ACTIVE_DEVICE = "cuda" if use_gpu else "cpu"
-            logger.info("Qwen3-TTS init OK: model=%s device=%s attn=%s", _QWEN3_MODEL_NAME, _QWEN3_ACTIVE_DEVICE, attn)
-            return
-        except Exception as exc:
-            last_exc = exc
-            logger.warning("Qwen3-TTS init with attn=%s failed: %s", attn, exc)
-            continue
-
-    _QWEN3 = None
-    _QWEN3_ERROR = str(last_exc) if last_exc else "all attn backends failed"
-    _QWEN3_ACTIVE_DEVICE = None
-    logger.exception("Qwen3-TTS init failed with gpu=%s", use_gpu)
-
-    if use_gpu and _qwen3_gpu_fallback_to_cpu():
-        try:
-            _QWEN3 = Qwen3TTSModel.from_pretrained(
-                _QWEN3_MODEL_NAME,
-                device_map="cpu",
-                dtype=dtype,
-                attn_implementation="sdpa",
-            )
-            if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "false").lower() in ("1", "true", "yes"):
-                try:
-                    _QWEN3 = torch.compile(_QWEN3, mode="reduce-overhead")
-                    logger.info("Qwen3-TTS torch.compile enabled (CPU fallback)")
-                except Exception as compile_exc:
-                    logger.warning("torch.compile skipped: %s", compile_exc)
-            _QWEN3_ERROR = None
-            _QWEN3_ACTIVE_DEVICE = "cpu"
-            logger.warning("Qwen3-TTS fallback to CPU after GPU init failure")
-        except Exception as exc:
-            _QWEN3 = None
-            _QWEN3_ERROR = f"GPU and CPU fallback failed: {exc}"
-            logger.exception("Qwen3-TTS CPU fallback failed")
 
 
 def _init_qwen3_base() -> bool:
-    """Ленивая загрузка Base-модели для клонирования голоса по WAV из storage/voices."""
-    global _QWEN3_BASE, _QWEN3_BASE_ERROR
+    """Загрузка Base 4-bit модели для клонирования голоса по WAV (storage/voices или voice_sample)."""
+    global _QWEN3_BASE, _QWEN3_BASE_ERROR, _QWEN3_BASE_DEVICE
     if _QWEN3_BASE is not None:
         return True
     if _QWEN3_BASE_ERROR is not None and "failed" in _QWEN3_BASE_ERROR.lower():
@@ -363,6 +248,7 @@ def _init_qwen3_base() -> bool:
             except Exception as compile_exc:
                 logger.warning("torch.compile skipped for Base model: %s", compile_exc)
         _QWEN3_BASE_ERROR = None
+        _QWEN3_BASE_DEVICE = "cuda" if use_gpu else "cpu"
         logger.info("Qwen3-TTS Base (voice clone) loaded: %s on %s", _QWEN3_BASE_MODEL_NAME, device_map)
         return True
     except Exception as exc:
@@ -759,25 +645,21 @@ def _espeak_synthesize(request: SynthesizeRequest) -> Response:
 def health() -> dict:
     cuda_ok, cuda_name = _gpu_runtime_status()
     gpu_vendor = _gpu_vendor()
-    active = "qwen3" if _QWEN3 is not None else "espeak" if _ESPEAK_BIN else "mock"
-    from .voice_design import get_status as voice_design_status
-    vd = voice_design_status()
+    active = "qwen3" if _QWEN3_BASE is not None else "espeak" if _ESPEAK_BIN else "mock"
+    # Если бэкенд qwen3, но модель не загружена — статус degraded (POST /synthesize будет 503)
+    status = "ok"
+    if _BACKEND in ("qwen3", "auto") and _QWEN3_BASE is None and not _QWEN3_BASE_LOADING:
+        status = "degraded"
     return {
-        "status": "ok",
+        "status": status,
         "requested_backend": _BACKEND,
         "active_backend": active,
-        "qwen3_ready": _QWEN3 is not None,
-        "qwen3_loading": _QWEN3_LOADING,
-        "qwen3_error": _QWEN3_ERROR,
-        "qwen3_model": _QWEN3_MODEL_NAME,
-        "qwen3_device": _QWEN3_ACTIVE_DEVICE,
         "qwen3_base_ready": _QWEN3_BASE is not None,
-        "qwen3_voice_clone": "storage/voices WAV -> Base model" if _QWEN3_BASE is not None else "lazy load on first use",
+        "qwen3_base_loading": _QWEN3_BASE_LOADING,
+        "qwen3_base_error": _QWEN3_BASE_ERROR,
+        "qwen3_base_model": _QWEN3_BASE_MODEL_NAME,
+        "qwen3_base_device": _QWEN3_BASE_DEVICE,
         "voice_clone_prompt_cache_size": len(_VOICE_CLONE_PROMPT_CACHE),
-        "voice_design_ready": vd.get("available", False),
-        "voice_design_loading": vd.get("loading", False),
-        "voice_design_error": vd.get("error"),
-        "voice_design_model": vd.get("model"),
         "device_preference": _device_preference(),
         "cuda_available": cuda_ok,
         "cuda_device": cuda_name,
@@ -796,125 +678,43 @@ def list_voices() -> list[VoiceInfo]:
     return _list_available_voices()
 
 
-def _voice_design_synthesize(request: SynthesizeRequest) -> Response:
-    """Синтез через VoiceDesign по текстовому описанию голоса. Отдельная модель, не трогает CustomVoice/Base."""
-    from .voice_design import synthesize as vd_synthesize
-    from .voice_design import is_available as vd_available
-
-    if not request.voice_description or not request.voice_description.strip():
-        raise HTTPException(status_code=400, detail="voice_description is required for VoiceDesign synthesis")
-    if not vd_available():
-        from .voice_design import get_status
-        st = get_status()
-        err = st.get("error") or "model not loaded (first load may take several minutes)"
-        logger.warning("VoiceDesign unavailable: %s", err)
-        print(f"[VoiceDesign] 503: {err}", flush=True)
-        raise HTTPException(status_code=503, detail=f"VoiceDesign unavailable: {err}")
+def _qwen3_synthesize_internal(request: SynthesizeRequest) -> tuple[bytes, int]:
+    """Синтез только через Base (voice clone). Требуется образец голоса WAV."""
+    if not _init_qwen3_base() or _QWEN3_BASE is None:
+        raise HTTPException(status_code=503, detail=f"Qwen3-TTS Base unavailable: {_QWEN3_BASE_ERROR}")
 
     language = _resolve_language(request)
+    speaker_wav_path = _resolve_coqui_speaker_wav(request)
+    if not speaker_wav_path or not Path(speaker_wav_path).exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Voice clone required: provide voice_sample or speaker with WAV in storage/voices",
+        )
+    logger.info("Qwen3 Base synthesis: wav=%s", Path(speaker_wav_path).name)
+
     try:
-        wavs, sr = vd_synthesize(
+        cache_key = str(Path(speaker_wav_path).resolve())
+        with _VOICE_CLONE_CACHE_LOCK:
+            prompt = _VOICE_CLONE_PROMPT_CACHE.get(cache_key)
+        if prompt is None:
+            prompt = _QWEN3_BASE.create_voice_clone_prompt(
+                ref_audio=speaker_wav_path,
+                ref_text="",
+                x_vector_only_mode=True,
+            )
+            with _VOICE_CLONE_CACHE_LOCK:
+                if len(_VOICE_CLONE_PROMPT_CACHE) >= _VOICE_CLONE_CACHE_MAX:
+                    _VOICE_CLONE_PROMPT_CACHE.pop(next(iter(_VOICE_CLONE_PROMPT_CACHE)), None)
+                _VOICE_CLONE_PROMPT_CACHE[cache_key] = prompt
+            logger.info("Voice clone prompt cached for %s", Path(speaker_wav_path).name)
+        wavs, sr = _QWEN3_BASE.generate_voice_clone(
             text=request.text,
             language=language,
-            voice_description=request.voice_description.strip(),
+            voice_clone_prompt=prompt,
         )
     except Exception as e:
-        logger.exception("VoiceDesign synthesize failed: %s", e)
+        logger.exception("Qwen3 voice_clone failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
-
-    if not wavs:
-        raise HTTPException(status_code=500, detail="VoiceDesign returned no audio")
-
-    import soundfile as sf  # noqa: PLC0415
-    wav_data = wavs[0] if isinstance(wavs, (list, tuple)) else wavs
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        sf.write(tmp_path, wav_data, sr)
-        content = tmp_path.read_bytes()
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-    with wave.open(BytesIO(content), "rb") as wf:
-        duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
-
-    return Response(
-        content=content,
-        media_type="audio/wav",
-        headers={
-            "x-duration-ms": str(duration_ms),
-            "x-tts-backend": "qwen3-voicedesign",
-            "x-tts-language": language,
-        },
-    )
-
-
-def _qwen3_synthesize_internal(request: SynthesizeRequest) -> tuple[bytes, int]:
-    """Core synthesis logic. Returns (content_bytes, duration_ms)."""
-    if _QWEN3 is None:
-        _init_qwen3()
-    if _QWEN3 is None:
-        raise HTTPException(status_code=503, detail=f"Qwen3-TTS unavailable: {_QWEN3_ERROR}")
-
-    language = _resolve_language(request)
-    # Образец голоса: voice_sample в запросе, audio_config.voices или registry (storage/voices/*.wav)
-    speaker_wav_path = _resolve_coqui_speaker_wav(request)
-    use_voice_clone = speaker_wav_path and Path(speaker_wav_path).exists()
-    if speaker_wav_path and not Path(speaker_wav_path).exists():
-        logger.warning("Speaker WAV path resolved but file missing: %s", speaker_wav_path)
-    logger.info(
-        "Qwen3 synthesis: speaker=%s wav=%s use_clone=%s",
-        request.speaker,
-        speaker_wav_path,
-        use_voice_clone,
-    )
-
-    if use_voice_clone:
-        if not _init_qwen3_base() or _QWEN3_BASE is None:
-            logger.warning("Voice clone requested but Base model unavailable, using CustomVoice")
-            use_voice_clone = False
-        else:
-            try:
-                cache_key = str(Path(speaker_wav_path).resolve())
-                with _VOICE_CLONE_CACHE_LOCK:
-                    prompt = _VOICE_CLONE_PROMPT_CACHE.get(cache_key)
-                if prompt is None:
-                    prompt = _QWEN3_BASE.create_voice_clone_prompt(
-                        ref_audio=speaker_wav_path,
-                        ref_text="",
-                        x_vector_only_mode=True,
-                    )
-                    with _VOICE_CLONE_CACHE_LOCK:
-                        if len(_VOICE_CLONE_PROMPT_CACHE) >= _VOICE_CLONE_CACHE_MAX:
-                            _VOICE_CLONE_PROMPT_CACHE.pop(next(iter(_VOICE_CLONE_PROMPT_CACHE)), None)
-                        _VOICE_CLONE_PROMPT_CACHE[cache_key] = prompt
-                    logger.info("Voice clone prompt cached for %s", Path(speaker_wav_path).name)
-                wavs, sr = _QWEN3_BASE.generate_voice_clone(
-                    text=request.text,
-                    language=language,
-                    voice_clone_prompt=prompt,
-                )
-            except Exception as e:
-                logger.warning("Qwen3 voice_clone failed (%s), fallback to CustomVoice", e)
-                use_voice_clone = False
-
-    if not use_voice_clone:
-        speaker = _resolve_qwen3_speaker(_normalize_speaker_label(request.speaker))
-        instruct_parts = []
-        if request.emotion.tempo != 1.0:
-            instruct_parts.append("чуть быстрее" if request.emotion.tempo > 1.0 else "чуть медленнее")
-        instruct = " ".join(instruct_parts).strip() or ""
-        try:
-            wavs, sr = _QWEN3.generate_custom_voice(
-                text=request.text,
-                language=language,
-                speaker=speaker,
-                instruct=instruct or None,
-            )
-        except Exception as e:
-            logger.exception("Qwen3 generate_custom_voice failed")
-            raise HTTPException(status_code=500, detail=str(e))
 
     if not wavs or not len(wavs):
         raise HTTPException(status_code=500, detail="Qwen3 returned no audio")
@@ -935,50 +735,126 @@ def _qwen3_synthesize_internal(request: SynthesizeRequest) -> tuple[bytes, int]:
 
 
 def _qwen3_synthesize(request: SynthesizeRequest) -> Response:
-    """Синтез: при наличии образца голоса в storage/voices — Base (clone), иначе CustomVoice."""
+    """Синтез только через Base (voice clone по WAV)."""
     content, duration_ms = _qwen3_synthesize_internal(request)
+    speaker_wav_path = _resolve_coqui_speaker_wav(request)
     headers = {
         "x-duration-ms": str(duration_ms),
         "x-tts-backend": "qwen3",
         "x-tts-language": _resolve_language(request),
         "x-tts-voice-source": "clone",
+        "x-tts-speaker-wav": Path(speaker_wav_path).name if speaker_wav_path else "",
     }
-    speaker_wav_path = _resolve_coqui_speaker_wav(request)
-    if speaker_wav_path and Path(speaker_wav_path).exists():
-        headers["x-tts-voice-source"] = "clone"
-        headers["x-tts-speaker-wav"] = Path(speaker_wav_path).name
-    else:
-        headers["x-tts-voice-source"] = "custom"
-        headers["x-tts-speaker"] = _resolve_qwen3_speaker(_normalize_speaker_label(request.speaker))
-    if _QWEN3_ACTIVE_DEVICE:
-        headers["x-tts-device"] = _QWEN3_ACTIVE_DEVICE
+    if _QWEN3_BASE_DEVICE:
+        headers["x-tts-device"] = _QWEN3_BASE_DEVICE
     v = _gpu_vendor()
     if v:
         headers["x-tts-gpu-vendor"] = v
     return Response(content=content, media_type="audio/wav", headers=headers)
 
 
+def _batch_item_to_request(item: SynthesizeBatchItem) -> SynthesizeRequest:
+    """Build a SynthesizeRequest from a batch item for resolution helpers."""
+    return SynthesizeRequest(
+        text=item.text,
+        speaker=item.speaker,
+        emotion=item.emotion or EmotionPayload(),
+        language=item.language,
+        voice_sample=item.voice_sample,
+        audio_config=item.audio_config,
+    )
+
+
+def _qwen3_batch_synthesize(items: list[SynthesizeBatchItem]) -> list[tuple[bytes, int]]:
+    """
+    Batch synthesis: только Base (voice clone). Группировка по (wav_path, language).
+    Для каждого элемента нужен образец голоса WAV; иначе 400.
+    """
+    if not items:
+        return []
+    resolved: list[tuple[str | None, str, SynthesizeRequest, int]] = []
+    for idx, item in enumerate(items):
+        req = _batch_item_to_request(item)
+        lang = _resolve_language(req)
+        speaker_wav = _resolve_coqui_speaker_wav(req)
+        if not speaker_wav or not Path(speaker_wav).exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Voice clone required for batch item {idx}: provide voice_sample or speaker with WAV in storage/voices",
+            )
+        resolved.append((speaker_wav, lang, req, idx))
+    groups: dict[tuple[str, str], list[tuple[SynthesizeRequest, int]]] = defaultdict(list)
+    for wav_path, lang, req, orig_idx in resolved:
+        groups[(wav_path, lang)].append((req, orig_idx))
+    result_slots: list[tuple[bytes, int] | None] = [None] * len(items)
+    import soundfile as sf  # noqa: PLC0415
+    if not _init_qwen3_base() or _QWEN3_BASE is None:
+        raise HTTPException(status_code=503, detail=f"Qwen3-TTS Base unavailable: {_QWEN3_BASE_ERROR}")
+    for (wav_path, lang), group_reqs in groups.items():
+        texts = [r.text for r, _ in group_reqs]
+        indices = [i for _, i in group_reqs]
+        try:
+            with _VOICE_CLONE_CACHE_LOCK:
+                prompt = _VOICE_CLONE_PROMPT_CACHE.get(str(Path(wav_path).resolve()))
+            if prompt is None:
+                prompt = _QWEN3_BASE.create_voice_clone_prompt(
+                    ref_audio=wav_path,
+                    ref_text="",
+                    x_vector_only_mode=True,
+                )
+                with _VOICE_CLONE_CACHE_LOCK:
+                    if len(_VOICE_CLONE_PROMPT_CACHE) >= _VOICE_CLONE_CACHE_MAX:
+                        _VOICE_CLONE_PROMPT_CACHE.pop(next(iter(_VOICE_CLONE_PROMPT_CACHE)), None)
+                    _VOICE_CLONE_PROMPT_CACHE[str(Path(wav_path).resolve())] = prompt
+            wavs_list, sr = _QWEN3_BASE.generate_voice_clone(
+                text=texts[0] if len(texts) == 1 else texts,
+                language=lang,
+                voice_clone_prompt=prompt,
+            )
+            if not isinstance(wavs_list, (list, tuple)):
+                wavs_list = [wavs_list]
+            for i, wav_data in enumerate(wavs_list):
+                if i < len(indices):
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                        tmp_path = Path(tmp.name)
+                    try:
+                        sf.write(tmp_path, wav_data, sr)
+                        content = tmp_path.read_bytes()
+                    finally:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                    with wave.open(BytesIO(content), "rb") as wf:
+                        duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+                    result_slots[indices[i]] = (content, duration_ms)
+        except Exception as e:
+            logger.warning("Qwen3 batch voice_clone failed for group, falling back to sequential: %s", e)
+            for req, orig_idx in group_reqs:
+                try:
+                    content, duration_ms = _qwen3_synthesize_internal(req)
+                    result_slots[orig_idx] = (content, duration_ms)
+                except Exception as e2:
+                    logger.exception("Qwen3 single voice_clone failed: %s", e2)
+                    raise HTTPException(status_code=500, detail=str(e2))
+    for i, slot in enumerate(result_slots):
+        if slot is None:
+            raise HTTPException(status_code=500, detail=f"Batch item {i} produced no audio")
+    return [result_slots[i] for i in range(len(items))]
+
+
 @app.post("/synthesize-batch")
 def synthesize_batch(request: SynthesizeBatchRequest) -> SynthesizeBatchResponse:
-    """Batch synthesis: sequential calls, one HTTP request. Reduces overhead."""
+    """Batch synthesis: только Base (voice clone); для каждого элемента нужен WAV."""
     if _require_gpu() and not _gpu_runtime_status()[0]:
         raise HTTPException(status_code=503, detail="GPU required but not available")
-    if _BACKEND not in ("qwen3", "auto") or _QWEN3 is None:
-        _init_qwen3()
-    if _QWEN3 is None:
-        raise HTTPException(status_code=503, detail=f"Qwen3-TTS unavailable: {_QWEN3_ERROR}")
-    results = []
-    for item in request.items:
-        req = SynthesizeRequest(
-            text=item.text,
-            speaker=item.speaker,
-            emotion=item.emotion or EmotionPayload(),
-            language=item.language,
-            voice_sample=item.voice_sample,
-            audio_config=item.audio_config,
-        )
-        content, duration_ms = _qwen3_synthesize_internal(req)
-        results.append(SynthesizeBatchResult(content_base64=base64.b64encode(content).decode("ascii"), duration_ms=duration_ms))
+    if _BACKEND not in ("qwen3", "auto"):
+        raise HTTPException(status_code=503, detail="Backend not qwen3")
+    if not _init_qwen3_base() or _QWEN3_BASE is None:
+        raise HTTPException(status_code=503, detail=f"Qwen3-TTS Base unavailable: {_QWEN3_BASE_ERROR}")
+    batch_results = _qwen3_batch_synthesize(request.items)
+    results = [
+        SynthesizeBatchResult(content_base64=base64.b64encode(content).decode("ascii"), duration_ms=duration_ms)
+        for content, duration_ms in batch_results
+    ]
     return SynthesizeBatchResponse(results=results)
 
 
@@ -994,27 +870,23 @@ def synthesize(request: SynthesizeRequest) -> Response:
         return _espeak_synthesize(request)
 
     if _BACKEND in ("qwen3", "auto"):
-        if _QWEN3 is None:
-            _init_qwen3()
-        if _QWEN3 is None:
+        if not _init_qwen3_base() or _QWEN3_BASE is None:
             if _BACKEND == "qwen3":
-                raise HTTPException(status_code=503, detail=f"Qwen3-TTS unavailable: {_QWEN3_ERROR}")
+                raise HTTPException(status_code=503, detail=f"Qwen3-TTS Base unavailable: {_QWEN3_BASE_ERROR}")
             if not _degraded_backend_allowed():
                 raise HTTPException(
                     status_code=503,
                     detail=(
-                        "Qwen3-TTS unavailable, degraded fallback disabled. "
+                        "Qwen3-TTS Base unavailable, degraded fallback disabled. "
                         "Set TTS_ALLOW_DEGRADED_BACKEND=true for espeak/mock. "
-                        f"Error: {_QWEN3_ERROR}"
+                        f"Error: {_QWEN3_BASE_ERROR}"
                     ),
                 )
             if _ESPEAK_BIN:
                 return _espeak_synthesize(request)
             return _mock_synthesize(request)
-        if _require_gpu() and _QWEN3_ACTIVE_DEVICE != "cuda":
-            raise HTTPException(status_code=503, detail="GPU required but Qwen3 is on CPU")
-        if request.voice_description and request.voice_description.strip():
-            return _voice_design_synthesize(request)
+        if _require_gpu() and _QWEN3_BASE_DEVICE != "cuda":
+            raise HTTPException(status_code=503, detail="GPU required but Qwen3 Base is on CPU")
         return _qwen3_synthesize(request)
 
     if _ESPEAK_BIN:

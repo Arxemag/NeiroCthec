@@ -2,11 +2,16 @@ import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } fro
 import type { Project } from '@prisma/client';
 import { AccessAuthGuard } from '../auth/guards';
 import { ProjectsService } from './projects.service';
+import { BooksService } from '../books/books.service';
 import { CreateProjectDto, UpdateProjectDto } from './dto';
+import { CreateBookFromProjectDto } from '../books/dto';
 
 @Controller('/api/projects')
 export class ProjectsController {
-  constructor(private readonly projects: ProjectsService) {}
+  constructor(
+    private readonly projects: ProjectsService,
+    private readonly books: BooksService,
+  ) {}
 
   @UseGuards(AccessAuthGuard)
   @Get()
@@ -72,6 +77,16 @@ export class ProjectsController {
   async restore(@Req() req: any, @Param('id') id: string) {
     const p = await this.projects.restore(id, req.user.sub);
     return { project: p };
+  }
+
+  @UseGuards(AccessAuthGuard)
+  @Post(':id/create-book')
+  async createBook(@Req() req: any, @Param('id') id: string, @Body() dto: CreateBookFromProjectDto) {
+    const book = await this.books.createFromProject(id, req.user.sub, {
+      appBookId: dto.appBookId,
+      appUserId: dto.appUserId?.trim() || undefined,
+    });
+    return { bookId: book.id, book };
   }
 }
 

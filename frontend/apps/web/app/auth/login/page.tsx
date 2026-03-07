@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Button } from '../../../components/ui';
 import { Card } from '../../../components/ui/card';
 import { setAccessToken, setStoredUserId } from '../../../lib/auth';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
@@ -13,6 +13,9 @@ type LoginResponse = { accessToken: string };
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const nextUrl = searchParams.get('next');
+  const redirectTo = nextUrl && nextUrl.startsWith('/app') ? nextUrl : '/app/projects';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -32,14 +35,8 @@ export default function LoginPage() {
       if (res.ok) {
         const data = (await res.json()) as LoginResponse;
         setAccessToken(data.accessToken);
-        setStoredUserId(email || 'dev-user');
-        router.push('/app/projects');
-        return;
-      }
-      if (res.status === 404 || res.status === 502) {
-        setAccessToken('dev');
-        setStoredUserId(email || process.env.NEXT_PUBLIC_DEV_USER_ID || 'dev-user');
-        router.push('/app/books');
+        setStoredUserId(email ?? '');
+        router.push(redirectTo);
         return;
       }
       const text = await res.text();
@@ -51,9 +48,7 @@ export default function LoginPage() {
       } catch {}
       setError(msg || 'Ошибка входа');
     } catch (_e: any) {
-      setAccessToken('dev');
-      setStoredUserId(email || process.env.NEXT_PUBLIC_DEV_USER_ID || 'dev-user');
-      router.push('/app/books');
+      setError('Не удалось подключиться к серверу. Проверьте сеть и повторите.');
     } finally {
       setLoading(false);
     }

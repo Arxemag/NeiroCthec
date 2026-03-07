@@ -40,6 +40,9 @@ class Line:
     full_original: Optional[str] = None
     base_line_id: Optional[int] = None
 
+    # Глава (по заголовкам в парсере)
+    chapter_id: Optional[int] = None  # 1 = первая глава / без явного заголовка
+
     # Результаты обработки
     speaker: Optional[str] = None  # "male", "female", "narrator"
     emotion: Optional[EmotionProfile] = None

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, FileUp, Pause, Pencil, Play, Trash2, X } from 'lucide-react';
 import { apiJson } from '../../../../lib/api';
 import { getAccessToken, getStoredUserId } from '../../../../lib/auth';
-import { isAppApiEnabled, getAppApiUrl, listVoices, listBooksByProject, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject, type AppBook } from '../../../../lib/app-api';
+import { isAppApiEnabled, getAppApiUrl, getBookChapterAudioUrl, listVoices, listBooksByProject, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject, type AppBook } from '../../../../lib/app-api';
 import { Button } from '../../../../components/ui';
 import { useParams, useRouter } from 'next/navigation';
 import { cacheProjectFile, getCachedFile, createFileFromCache, hasCachedFile } from '../../../../lib/file-cache';
@@ -68,6 +68,7 @@ export default function ProjectPage() {
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [showCreateBookConfirm, setShowCreateBookConfirm] = useState(false);
   const [creatingBook, setCreatingBook] = useState(false);
+  const [hasListenedToFinalAudio, setHasListenedToFinalAudio] = useState(false);
   const fullProcessingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -80,6 +81,8 @@ export default function ProjectPage() {
   const finalBookAudioUrlRef = useRef<string | null>(null);
   /** Список книг проекта из App API (загруженные текстовые файлы). */
   const [projectBooks, setProjectBooks] = useState<AppBook[]>([]);
+  /** Номера готовых глав (из GET /books/:id/status chapters_ready) — для раннего воспроизведения по главам. */
+  const [chaptersReadyFromApp, setChaptersReadyFromApp] = useState<number[]>([]);
 
   async function loadChapters() {
     try {
@@ -449,12 +452,31 @@ export default function ProjectPage() {
     }
   }
 
+  async function saveTitle() {
+    if (!project) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const out = await apiJson<{ project: Project }>(`/api/projects/${projectId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: project.title }),
+      });
+      setProject(out.project);
+      setShowTitleEdit(false);
+    } catch (e: any) {
+      setError(e?.message ?? 'Не удалось сохранить название');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function startAppProgressTracking(bookId: string) {
     if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
     progressIntervalRef.current = setInterval(async () => {
       try {
         const st = await getBookStatus(bookId);
         setProcessingProgress(st.progress);
+        if (Array.isArray(st.chapters_ready)) setChaptersReadyFromApp(st.chapters_ready);
         const isFinished = st.stage === 'completed' || st.stage === 'done' || st.stage === 'error' || st.progress >= 100;
         if (isFinished) {
           if (progressIntervalRef.current) {
@@ -505,6 +527,7 @@ export default function ProjectPage() {
         finalBookAudioUrlRef.current = null;
       }
       setFinalBookAudioUrl(null);
+      setChaptersReadyFromApp([]);
       try {
         await putAudioConfigVoiceIds(selectedVoiceIds);
         await processBookStage4(lastUploadedBookId, 500, selectedVoiceIds);
@@ -562,20 +585,28 @@ export default function ProjectPage() {
 
   async function createBook() {
     if (!project) return;
-    
+
+    const appBookId = lastUploadedBookId ?? projectBooks.find((b) => b.final_audio_path)?.id;
+    if (!appBookId) {
+      setError('Нет озвученной книги для создания. Дождитесь завершения озвучки.');
+      return;
+    }
+
     setCreatingBook(true);
     setError(null);
     try {
-      // Пытаемся создать книгу через API
-      const data = await apiJson<{ bookId: string }>(`/api/projects/${projectId}/create-book`, { method: 'POST' });
-      // Переходим на страницу "Мои книги"
+      const appUserId = getStoredUserId() ?? (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_DEV_USER_ID) ?? undefined;
+      await apiJson<{ bookId: string }>(`/api/projects/${projectId}/create-book`, {
+        method: 'POST',
+        body: JSON.stringify({ appBookId, ...(appUserId && { appUserId }) }),
+      });
       router.push('/app/books');
     } catch (e: any) {
-      // Если endpoint не существует, показываем сообщение и не переходим
       console.error('Ошибка создания книги:', e);
       setError(e?.message ?? 'Не удалось создать аудио книгу. Endpoint может быть не реализован.');
-      setCreatingBook(false);
       setShowCreateBookConfirm(false);
+    } finally {
+      setCreatingBook(false);
     }
   }
 
@@ -672,14 +703,16 @@ export default function ProjectPage() {
         const bookIds: string[] = [];
         const userId = getStoredUserId() ?? (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_DEV_USER_ID) ?? 'anonymous';
         for (const fileData of uploadedFiles) {
+          const formData = new FormData();
+          formData.append('file', fileData.file);
+          if (project?.title?.trim()) formData.append('project_title', project.title.trim());
           const response = await fetch(`${appApiUrl.replace(/\/$/, '')}/api/books/upload`, {
             method: 'POST',
-            headers: { 'X-User-Id': userId, 'X-Project-Id': projectId },
-            body: (() => {
-              const formData = new FormData();
-              formData.append('file', fileData.file);
-              return formData;
-            })(),
+            headers: {
+              'X-User-Id': userId,
+              'X-Project-Id': projectId,
+            },
+            body: formData,
           });
 
           if (response.status === 422) {
@@ -1112,12 +1145,50 @@ export default function ProjectPage() {
       {showTitleEdit && !isCompleted && (
         <div className="space-y-3">
           <label className="text-sm text-text">Название</label>
-          <input
-            className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-text outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 transition-colors"
-            value={project.title}
-            onChange={(e) => setProject({ ...project, title: e.target.value })}
-            disabled={!canEdit}
-          />
+          <div className="flex items-center gap-2">
+            <input
+              className="flex-1 min-w-0 rounded-lg border border-border bg-surface px-3 py-2 text-text outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 transition-colors"
+              value={project.title}
+              onChange={(e) => setProject({ ...project, title: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void saveTitle();
+                }
+                if (e.key === 'Escape') {
+                  setShowTitleEdit(false);
+                  void loadAll({ silent: true });
+                }
+              }}
+              disabled={!canEdit}
+              autoFocus
+            />
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={() => void saveTitle()}
+              disabled={!canEdit || saving}
+              title="Сохранить название"
+              className="shrink-0"
+            >
+              <Check className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setShowTitleEdit(false);
+                void loadAll({ silent: true });
+              }}
+              disabled={saving}
+              title="Отмена"
+              className="shrink-0"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       )}
 
@@ -1524,7 +1595,7 @@ export default function ProjectPage() {
                 }
                 onClick={generateAudio}
               >
-                {generating ? 'Запускаем…' : 'Сгенерировать озвучку фрагмента'}
+                {generating ? 'Запускаем…' : 'Сгенерировать озвучку'}
               </Button>
             </div>
           </div>
@@ -1569,10 +1640,36 @@ export default function ProjectPage() {
         </div>
 
         <div className="mt-4 space-y-3">
+          {isAppApiEnabled() && lastUploadedBookId && chaptersReadyFromApp.length >= 1 && (
+            <div className="rounded-lg border border-border bg-surface p-3 space-y-2">
+              <div className="text-sm font-medium text-text">Главы готовы к прослушиванию</div>
+              <p className="text-xs text-textSecondary">
+                Можно слушать готовые главы, не дожидаясь полной озвучки книги.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {chaptersReadyFromApp.map((num) => (
+                  <audio
+                    key={num}
+                    controls
+                    className="w-full min-w-[200px]"
+                    src={getBookChapterAudioUrl(lastUploadedBookId, num)}
+                    title={`Глава ${num}`}
+                  />
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1 pt-1">
+                {chaptersReadyFromApp.map((num) => (
+                  <span key={num} className="text-xs px-2 py-0.5 rounded bg-surfaceSoft text-textSecondary">
+                    Глава {num}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {isAppApiEnabled() && finalBookAudioUrl ? (
             <div className="rounded-lg border border-border bg-surface p-3">
               <div className="text-sm font-medium text-text mb-2">Финальное аудио книги</div>
-              <audio controls className="w-full" src={finalBookAudioUrl} />
+              <audio controls className="w-full" src={finalBookAudioUrl} onPlay={() => setHasListenedToFinalAudio(true)} />
             </div>
           ) : previewAudios.length === 0 ? (
             <div className="text-sm text-textSecondary text-center py-4">
@@ -1591,7 +1688,7 @@ export default function ProjectPage() {
                       {new Date(audio.createdAt).toLocaleString()}
                     </div>
                   </div>
-                  <audio controls className="w-full" src={audioSrc} />
+                  <audio controls className="w-full" src={audioSrc} onPlay={() => setHasListenedToFinalAudio(true)} />
                 </div>
               );
             })
@@ -1687,19 +1784,23 @@ export default function ProjectPage() {
         </div>
       )}
       
-      {/* Кнопка создания аудио книги */}
-      {chapters.length > 0 && !isCompleted && (
-        <div className="mt-6 pt-6 border-t border-border">
-          <Button
-            variant="primary"
-            className="w-full bg-green-600 hover:bg-green-700 text-white focus-visible:ring-green-500"
-            onClick={() => setShowCreateBookConfirm(true)}
-            disabled={creatingBook}
-          >
-            {creatingBook ? 'Создание…' : 'Создать аудио книгу'}
-          </Button>
-        </div>
-      )}
+      {/* Кнопка создания аудио книги — показывается только при наличии финального аудио и после прослушивания */}
+      {(() => {
+        const hasFinalAudio = (isAppApiEnabled() && finalBookAudioUrl) || (!isAppApiEnabled() && previewAudios.length > 0);
+        if (!hasFinalAudio || !hasListenedToFinalAudio || isCompleted) return null;
+        return (
+          <div className="mt-6 pt-6 border-t border-border">
+            <Button
+              variant="primary"
+              className="w-full bg-green-600 hover:bg-green-700 text-white focus-visible:ring-green-500"
+              onClick={() => setShowCreateBookConfirm(true)}
+              disabled={creatingBook}
+            >
+              {creatingBook ? 'Создание…' : 'Создать аудио книгу'}
+            </Button>
+          </div>
+        );
+      })()}
       
       {/* Модальное окно подтверждения создания книги */}
       {showCreateBookConfirm && (

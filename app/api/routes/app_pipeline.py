@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import threading
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
 
 # Имя файла с последними voice_ids по книге (для переиспользования уже озвученных строк)
@@ -152,6 +154,7 @@ def _build_ubf_from_state(lines_data: list, done: dict) -> UserBookFormat:
                 original=t.get("text", ""),
                 remarks=[],
                 is_segment=False,
+                chapter_id=t.get("chapter_id"),
                 speaker=t.get("voice"),
                 emotion=emotion,
                 audio_path=audio_path,
@@ -188,7 +191,35 @@ def _assemble_final_audio(user_id: str, book_id: str) -> Path | None:
     return out_file
 
 
+def _assemble_chapter_audio(user_id: str, book_id: str, chapter_id: int) -> Path | None:
+    """Собирает WAV одной главы (строки с chapter_id) и возвращает путь. None если не все строки главы готовы."""
+    key = (user_id, book_id)
+    with _lock:
+        state = _book_states.get(key)
+        if not state:
+            return None
+        lines_data = state.get("lines") or []
+        done = state.get("done") or {}
+    chapter_lines = [t for t in lines_data if (t.get("chapter_id") or 1) == chapter_id]
+    if not chapter_lines:
+        return None
+    line_ids = [t["line_id"] for t in chapter_lines]
+    if not all(lid in done for lid in line_ids):
+        return None
+    book_dir = STORAGE_ROOT / "books" / user_id / book_id
+    chapters_dir = book_dir / "chapters"
+    chapters_dir.mkdir(parents=True, exist_ok=True)
+    out_file = chapters_dir / f"chapter_{chapter_id:03d}.wav"
+    ubf = _build_ubf_from_state(chapter_lines, done)
+    if not ubf.lines:
+        return None
+    Stage5Assembler().process(ubf, out_file)
+    return out_file
+
+
 # --- Роутер для /books ---
+from api.routes.books import _read_book_title
+
 books_router = APIRouter()
 _PROJECT_ID_FILE = ".project_id"
 
@@ -240,9 +271,10 @@ def list_books(
             final_audio_path = str(fp)
             if status == "uploaded":
                 status = "done"
+        book_dir = STORAGE_ROOT / "books" / user_id / book_id
         result.append({
             "id": book_id,
-            "title": book_id,
+            "title": _read_book_title(book_dir),
             "status": status,
             "created_at": "",
             "final_audio_path": final_audio_path,
@@ -289,9 +321,10 @@ def get_book(
         final_audio_path = str(final_path)
         if status == "uploaded":
             status = "done"
+    book_dir = STORAGE_ROOT / "books" / user_id / book_id
     return {
         "id": book_id,
-        "title": book_id,
+        "title": _read_book_title(book_dir),
         "status": status,
         "created_at": "",
         "final_audio_path": final_audio_path,
@@ -311,7 +344,7 @@ def get_book_status(
     with _lock:
         state = _book_states.get(key)
     if not state:
-        return {"stage": "idle", "progress": 0, "total_lines": 0, "tts_done": 0}
+        return {"stage": "idle", "progress": 0, "total_lines": 0, "tts_done": 0, "chapters_ready": []}
     lines = state.get("lines") or []
     done = state.get("done") or {}
     total = len(lines)
@@ -325,12 +358,51 @@ def get_book_status(
         stage = "done"
     else:
         stage = "idle"
+    # Номера глав, у которых все строки в done
+    chapter_line_ids: dict[int, list[int]] = defaultdict(list)
+    for t in lines:
+        ch = t.get("chapter_id") or 1
+        chapter_line_ids[ch].append(t["line_id"])
+    chapters_ready = [
+        ch for ch in sorted(chapter_line_ids)
+        if all(lid in done for lid in chapter_line_ids[ch])
+    ]
     return {
         "stage": stage,
         "progress": progress,
         "total_lines": total,
         "tts_done": tts_done,
+        "chapters_ready": chapters_ready,
     }
+
+
+@books_router.get("/{book_id}/chapters/{chapter_num}")
+def get_book_chapter_audio(
+    book_id: str,
+    chapter_num: int,
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+):
+    """GET /books/:id/chapters/:num — отдать WAV главы. Если файла нет и глава полная — собираем по запросу."""
+    user_id = (x_user_id or "").strip() or "anonymous"
+    if not _book_dir(user_id, book_id):
+        raise HTTPException(status_code=404, detail="Book not found")
+    book_dir = STORAGE_ROOT / "books" / user_id / book_id
+    chapters_dir = book_dir / "chapters"
+    chapter_file = chapters_dir / f"chapter_{chapter_num:03d}.wav"
+    if chapter_file.exists():
+        return FileResponse(
+            chapter_file,
+            media_type="audio/wav",
+            filename=chapter_file.name,
+        )
+    path = _assemble_chapter_audio(user_id, book_id, chapter_num)
+    if path and path.exists():
+        return FileResponse(
+            path,
+            media_type="audio/wav",
+            filename=path.name,
+        )
+    raise HTTPException(status_code=404, detail="Chapter not ready or not found")
 
 
 @books_router.get("/{book_id}/download")
@@ -360,6 +432,92 @@ def download_book_audio(
 
 # --- Роутер для /internal ---
 internal_router = APIRouter()
+
+AUDIOBOOKS_ROOT = STORAGE_ROOT / "audiobooks"
+
+
+def _sanitize_folder_name(name: str) -> str:
+    """Имя папки без недопустимых символов; пробелы в подчёркивания."""
+    s = (name or "").strip() or "book"
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", s)
+    s = re.sub(r"\s+", "_", s)
+    return s[:200] or "book"
+
+
+@internal_router.post("/finalize-audiobook")
+def post_finalize_audiobook(
+    body: dict = Body(default_factory=dict),
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+):
+    """
+    POST /internal/finalize-audiobook — копирует финальное аудио в storage/audiobooks/<user_id>/<название_книги>/,
+    затем удаляет рабочую папку storage/books/<user_id>/<book_id>/.
+    Тело: user_id, book_id, project_title (опционально). Возвращает folder (имя папки для стриминга).
+    """
+    user_id = (x_user_id or "").strip() or (body or {}).get("user_id") or "anonymous"
+    book_id = (body or {}).get("book_id")
+    if not book_id:
+        raise HTTPException(status_code=400, detail="book_id is required")
+    book_dir = _book_dir(user_id, book_id)
+    if not book_dir:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    title = (body or {}).get("project_title") or _read_book_title(book_dir)
+    folder_name = _sanitize_folder_name(title)
+    out_dir = AUDIOBOOKS_ROOT / user_id / folder_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    final_wav = book_dir / "final.wav"
+    copied = []
+    if final_wav.exists():
+        dest = out_dir / "full.wav"
+        shutil.copy2(final_wav, dest)
+        copied.append(str(dest))
+
+    chapters_dir = book_dir / "chapters"
+    if chapters_dir.exists():
+        for f in sorted(chapters_dir.glob("*.wav")):
+            dest = out_dir / f.name
+            shutil.copy2(f, dest)
+            copied.append(str(dest))
+
+    if not copied:
+        raise HTTPException(
+            status_code=404,
+            detail="No final.wav or chapter WAVs found. Finish narration first.",
+        )
+
+    try:
+        shutil.rmtree(book_dir)
+    except OSError as e:
+        # Копия уже в audiobooks — логируем, но не падаем
+        import logging
+        logging.getLogger(__name__).warning("Failed to remove book_dir %s: %s", book_dir, e)
+
+    return {"path": str(out_dir), "files": copied, "folder": folder_name}
+
+
+@internal_router.get("/audiobooks/stream")
+def get_audiobook_stream(
+    folder: str,
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+):
+    """
+    GET /internal/audiobooks/stream?folder=<name> — отдать full.wav из storage/audiobooks/<user_id>/<folder>/.
+    Требуется заголовок X-User-Id. Имя folder должно совпадать с результатом _sanitize_folder_name.
+    """
+    user_id = (x_user_id or "").strip() or "anonymous"
+    safe_folder = _sanitize_folder_name(folder)
+    if safe_folder != folder:
+        raise HTTPException(status_code=400, detail="Invalid folder name")
+    file_path = AUDIOBOOKS_ROOT / user_id / folder / "full.wav"
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Audiobook file not found")
+    return FileResponse(
+        file_path,
+        media_type="audio/wav",
+        filename="full.wav",
+    )
 
 
 @internal_router.post("/process-book-stage4")
@@ -432,6 +590,7 @@ def post_process_book_stage4(
             "role": role,
             "emotion": _emotion_to_dict(line.emotion),
             "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
+            "chapter_id": (line.chapter_id if line.chapter_id is not None else 1),
         })
 
     # Переиспользование уже озвученных строк: если line_{id}.wav есть и голос роли не менялся — в done, иначе в pending.

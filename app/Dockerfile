@@ -34,8 +34,9 @@ RUN pip install --no-cache-dir packaging ninja \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Устанавливаем TTS и зависимости для FastAPI TTS-сервиса
+# Устанавливаем TTS и зависимости для FastAPI TTS-сервиса (Base 4-bit требует bitsandbytes и accelerate)
 RUN pip install --no-cache-dir TTS==0.22.0 fastapi uvicorn pyyaml qwen-tts
+RUN pip install --no-cache-dir "bitsandbytes>=0.42.0" accelerate
 
 # Копируем код
 COPY . /app

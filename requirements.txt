@@ -12,10 +12,9 @@ torch==2.2.2
 torchaudio==2.2.2
 
 # ===============================
-# NLP / TTS
+# NLP (TTS только Qwen3 в tts_engine_service, Coqui удалён)
 # ===============================
 transformers==4.36.2
-TTS==0.22.0
 pymorphy2==0.9.1
 pymorphy2-dicts-ru==2.4.417127.4579844
 regex==2023.12.25

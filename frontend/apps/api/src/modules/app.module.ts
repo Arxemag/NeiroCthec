@@ -6,6 +6,7 @@ import { UsersModule } from './users/users.module';
 import { VoicesModule } from './voices/voices.module';
 import { ProjectsModule } from './projects/projects.module';
 import { AudiosModule } from './audios/audios.module';
+import { BooksModule } from './books/books.module';
 import { SubscriptionModule } from './subscription/subscription.module';
 import { HealthModule } from './health/health.module';
 import { StorageModule } from './storage/storage.module';
@@ -23,6 +24,7 @@ import { AdminModule } from './admin/admin.module';
     VoicesModule,
     ProjectsModule,
     AudiosModule,
+    BooksModule,
     SubscriptionModule,
     HealthModule,
     AdminModule,

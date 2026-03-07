@@ -10,6 +10,7 @@ import {
   getBookStatus,
   deleteBook as appDeleteBook,
   downloadBookAudio,
+  getAudiobookStreamBlob,
   processBookStage4,
 } from '../../../lib/app-api';
 import { Button } from '../../../components/ui';
@@ -37,6 +38,10 @@ type Book = {
   } | null;
   /** Книга из App API (Python backend) */
   fromApp?: boolean;
+  /** ID книги в App API для воспроизведения/скачивания (Nest-книги, созданные из проекта) */
+  appBookId?: string | null;
+  /** Папка в storage/audiobooks после finalize — воспроизведение через App API stream */
+  audiobookFolder?: string | null;
   status?: string;
   final_audio_path?: string | null;
   progress?: number;
@@ -116,12 +121,24 @@ export default function BooksPage() {
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [startingTtsId, setStartingTtsId] = useState<string | null>(null);
+  const [appBookPlaybackUrls, setAppBookPlaybackUrls] = useState<Record<string, string>>({});
   const appBooksPollRef = useRef<NodeJS.Timeout | null>(null);
 
   async function loadBooks() {
     setLoading(true);
     setError(null);
     try {
+      // Сначала пробуем загрузить книги из Nest API (GET /api/books)
+      try {
+        const data = await apiJson<{ books: Book[]; total?: number }>('/api/books');
+        if (data.books && data.books.length >= 0) {
+          setBooks(data.books);
+          return;
+        }
+      } catch (_) {
+        // Nest API недоступен или ошибка — fallback ниже
+      }
+
       if (isAppApiEnabled()) {
         const appBooks = await listBooks();
         const withStatus = await Promise.all(
@@ -170,60 +187,48 @@ export default function BooksPage() {
         return;
       }
 
-      const data = await apiJson<{ books: Book[]; total?: number }>('/api/books');
-      setBooks(data.books || []);
+      const projectsData = await apiJson<{ projects: Array<{ id: string; title: string; language: string; status: string; updatedAt: string }> }>('/api/projects');
+      const projects = projectsData.projects.filter((p) => p.status === 'completed') || [];
+      const booksData: Book[] = await Promise.all(
+        projects.map(async (project) => {
+          try {
+            const audiosData = await apiJson<{ audios: Array<{ id: string; status: string; format?: string | null; durationSeconds?: number | null }> }>(`/api/projects/${project.id}/audios`);
+            const readyAudio = audiosData.audios?.find((a) => a.status === 'ready');
+            return {
+              id: project.id,
+              projectId: project.id,
+              title: project.title,
+              description: null,
+              author: null,
+              coverImageUrl: null,
+              language: project.language,
+              updatedAt: project.updatedAt,
+              audio: readyAudio ? {
+                id: readyAudio.id,
+                status: readyAudio.status,
+                format: readyAudio.format,
+                durationSeconds: readyAudio.durationSeconds,
+                streamUrl: `/api/audios/${readyAudio.id}/stream`,
+              } : null,
+            };
+          } catch {
+            return {
+              id: project.id,
+              projectId: project.id,
+              title: project.title,
+              description: null,
+              author: null,
+              coverImageUrl: null,
+              language: project.language,
+              updatedAt: project.updatedAt,
+              audio: null,
+            };
+          }
+        })
+      );
+      setBooks(booksData);
     } catch (e: any) {
-      if (isAppApiEnabled()) {
-        setError(e?.message ?? 'Ошибка загрузки книг из App');
-        return;
-      }
-      try {
-        const projectsData = await apiJson<{ projects: Array<{ id: string; title: string; language: string; status: string; updatedAt: string }> }>('/api/projects');
-        const projects = projectsData.projects.filter((p) => p.status === 'completed') || [];
-        
-        // Преобразуем проекты в книги (временное решение до реализации Book API)
-        const booksData: Book[] = await Promise.all(
-          projects.map(async (project) => {
-            try {
-              const audiosData = await apiJson<{ audios: Array<{ id: string; status: string; format?: string | null; durationSeconds?: number | null }> }>(`/api/projects/${project.id}/audios`);
-              const readyAudio = audiosData.audios?.find((a) => a.status === 'ready');
-              return {
-                id: project.id, // Временно используем projectId как bookId
-                projectId: project.id,
-                title: project.title,
-                description: null,
-                author: null,
-                coverImageUrl: null,
-                language: project.language,
-                updatedAt: project.updatedAt,
-                audio: readyAudio ? {
-                  id: readyAudio.id,
-                  status: readyAudio.status,
-                  format: readyAudio.format,
-                  durationSeconds: readyAudio.durationSeconds,
-                  streamUrl: `/api/audios/${readyAudio.id}/stream`,
-                } : null,
-              };
-            } catch {
-              return {
-                id: project.id,
-                projectId: project.id,
-                title: project.title,
-                description: null,
-                author: null,
-                coverImageUrl: null,
-                language: project.language,
-                updatedAt: project.updatedAt,
-                audio: null,
-              };
-            }
-          })
-        );
-        
-        setBooks(booksData);
-      } catch (fallbackError: any) {
-        setError(fallbackError?.message ?? 'Ошибка загрузки');
-      }
+      setError(e?.message ?? 'Ошибка загрузки');
     } finally {
       setLoading(false);
     }
@@ -234,9 +239,9 @@ export default function BooksPage() {
     setError(null);
     try {
       const data = await apiJson<{ books: TrashedBook[] }>('/api/books/trash');
-      setTrash(data.books);
-    } catch (e: any) {
-      setError(e?.message ?? 'Ошибка загрузки корзины');
+      setTrash(data.books ?? []);
+    } catch {
+      setTrash([]);
     } finally {
       setTrashLoading(false);
     }
@@ -253,6 +258,13 @@ export default function BooksPage() {
         await apiJson(`/api/books/${id}`, { method: 'DELETE' });
       }
       setBooks((prev) => prev.filter((b) => b.id !== id));
+      setAppBookPlaybackUrls((prev) => {
+        const url = prev[id];
+        if (url) URL.revokeObjectURL(url);
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       if (showTrash && !book?.fromApp) loadTrash();
     } catch (e: any) {
       setError(e?.message ?? 'Не удалось удалить книгу');
@@ -261,21 +273,38 @@ export default function BooksPage() {
     }
   }
 
-  async function handleDownloadAppBook(bookId: string, title: string) {
-    setDownloadingId(bookId);
+  async function handleDownloadAppBook(book: Book) {
+    const bookId = book.audiobookFolder ? book.id : book.appBookId!;
+    setDownloadingId(book.id);
     setError(null);
     try {
-      const { blob, filename } = await downloadBookAudio(bookId);
+      const { blob, filename } = book.audiobookFolder
+        ? await getAudiobookStreamBlob(book.audiobookFolder)
+        : await downloadBookAudio(bookId);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename;
+      a.download = book.audiobookFolder ? (book.title.replace(/[<>:"/\\|?*]/g, '_') + '.wav') : filename;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e: any) {
       setError(e?.message ?? 'Не удалось скачать аудио');
     } finally {
       setDownloadingId(null);
+    }
+  }
+
+  async function loadAppBookPlayback(bookId: string, book: Book) {
+    if (appBookPlaybackUrls[bookId]) return;
+    setError(null);
+    try {
+      const { blob } = book.audiobookFolder
+        ? await getAudiobookStreamBlob(book.audiobookFolder)
+        : await downloadBookAudio(book.appBookId!);
+      const url = URL.createObjectURL(blob);
+      setAppBookPlaybackUrls((prev) => ({ ...prev, [bookId]: url }));
+    } catch (e: any) {
+      setError(e?.message ?? 'Не удалось загрузить аудио для воспроизведения');
     }
   }
 
@@ -315,6 +344,14 @@ export default function BooksPage() {
 
   useEffect(() => {
     void loadBooks();
+  }, []);
+
+  const appBookPlaybackUrlsRef = useRef<Record<string, string>>({});
+  appBookPlaybackUrlsRef.current = appBookPlaybackUrls;
+  useEffect(() => {
+    return () => {
+      Object.values(appBookPlaybackUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+    };
   }, []);
 
   // Опрос статуса книг из App, пока есть книги в обработке
@@ -529,21 +566,19 @@ export default function BooksPage() {
         <button onClick={loadBooks} className="text-sm text-primary dark:text-accent hover:text-text hover:underline transition-colors">
           Обновить список
         </button>
-        {!isAppApiEnabled() && (
-          <button
-            type="button"
-            onClick={() => {
-              setShowTrash((v) => {
-                if (!v) loadTrash();
-                return !v;
-              });
-            }}
-            className="flex items-center gap-1.5 text-sm text-textSecondary hover:text-text transition-colors"
-          >
-            <Trash2 className="h-4 w-4" />
-            {showTrash ? 'Скрыть корзину' : 'Корзина'}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => {
+            setShowTrash((v) => {
+              if (!v) loadTrash();
+              return !v;
+            });
+          }}
+          className="flex items-center gap-1.5 text-sm text-textSecondary hover:text-text transition-colors"
+        >
+          <Trash2 className="h-4 w-4" />
+          {showTrash ? 'Скрыть корзину' : 'Корзина'}
+        </button>
       </div>
 
       <div className="mt-6">
@@ -898,9 +933,36 @@ export default function BooksPage() {
                             </div>
                           </div>
 
-                          {/* Аудио плеер - всегда показываем, даже если аудио еще нет */}
+                          {/* Аудио плеер — финализированная (audiobookFolder) / appBookId (App API) / book.audio (Nest) */}
                           <div className="space-y-2">
-                            {book.audio ? (
+                            {(book.audiobookFolder || book.appBookId) && isAppApiEnabled() ? (
+                              <>
+                                <div className="flex items-center gap-2 mb-2">
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => handleDownloadAppBook(book)}
+                                    disabled={downloadingId === book.id}
+                                  >
+                                    <Download className="h-3.5 w-3.5 mr-1" />
+                                    {downloadingId === book.id ? 'Скачивание…' : 'Скачать'}
+                                  </Button>
+                                  {!appBookPlaybackUrls[book.id] && (
+                                    <Button
+                                      variant="secondary"
+                                      size="sm"
+                                      onClick={() => loadAppBookPlayback(book.id, book)}
+                                    >
+                                      <Play className="h-3.5 w-3.5 mr-1" />
+                                      Прослушать
+                                    </Button>
+                                  )}
+                                </div>
+                                {appBookPlaybackUrls[book.id] && (
+                                  <audio controls className="w-full" src={appBookPlaybackUrls[book.id]} />
+                                )}
+                              </>
+                            ) : book.audio?.streamUrl ? (
                               <>
                                 <div className="flex items-center gap-4 text-xs text-textSecondary">
                                   {book.audio.durationSeconds && (
@@ -921,7 +983,6 @@ export default function BooksPage() {
                                 <div className="text-xs text-textSecondary mb-2">
                                   Аудиокнига еще не сгенерирована
                                 </div>
-                                {/* Заглушка проигрывателя */}
                                 <div className="w-full h-12 rounded-lg border border-border bg-surface flex items-center justify-center">
                                   <div className="flex items-center gap-2 text-textMuted">
                                     <div className="w-8 h-8 rounded-full border-2 border-border flex items-center justify-center">

@@ -92,6 +92,8 @@ docker compose up -d core stage4
 
 ### 5. TTS Qwen3
 
+Используется **только модель Base 4-bit** (`divyajot5005/Qwen3-TTS-12Hz-1.7B-Base-BNB-4bit`): синтез только по образцу голоса (voice clone). Для каждого запроса нужен WAV в `storage/voices` или в запросе (`voice_sample` / голос из настроек). Для 4-bit в окружении должны быть установлены `bitsandbytes` и `accelerate`.
+
 #### Вариант A — локальный TTS на AMD (рекомендуется для вас)
 
 Запускается **вне Docker** на хосте:
@@ -101,8 +103,11 @@ cd app
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+pip install "bitsandbytes>=0.42.0" accelerate
 python -m tts_engine_service.app    # слушает порт 8020
 ```
+
+При проблемах с 4-bit на ROCm можно переопределить модель: `set TTS_QWEN3_BASE_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base` (полная Base без квантизации).
 
 Stage4 в контейнере по умолчанию обращается к TTS по адресу:
 
@@ -120,7 +125,15 @@ EXTERNAL_TTS_URL=http://host.docker.internal:8020
 docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile nvidia-tts up -d
 ```
 
-Файл `docker-compose.nvidia-tts.yml` переопределяет `EXTERNAL_TTS_URL=http://tts:8020`, чтобы Stage4 обращался к контейнеру TTS, а не к хосту.
+Файл `docker-compose.nvidia-tts.yml` переопределяет `EXTERNAL_TTS_URL=http://tts:8020`, чтобы Stage4 обращался к контейнеру TTS, а не к хосту. Образ TTS уже включает `bitsandbytes` и `accelerate` для 4-bit модели.
+
+#### Несколько воркеров Stage4 (вариант A)
+
+В `docker-compose.yml` у сервиса `stage4` задано `deploy.replicas: 2`. Все реплики обращаются к одному Core (`tts-next` / `tts-next-batch`); каждая задача выдаётся один раз. Чтобы поднять больше воркеров (2–4 в зависимости от нагрузки):
+
+```bat
+docker compose up -d --scale stage4=4
+```
 
 ---
 
@@ -140,7 +153,28 @@ docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile 
 
 ---
 
-### 7. Частые проблемы
+### 7. Дебаг: проверка поднятия контейнеров
+
+Скрипт по шагам проверяет конфигурацию, создаёт `.env` из примеров при отсутствии, поднимает весь стек и выводит статус и логи:
+
+```bat
+cd NeiroCthec
+powershell -ExecutionPolicy Bypass -File scripts/docker-debug.ps1
+```
+
+Если путь к проекту содержит квадратные скобки (например `[01]`), запускайте из корня проекта так, чтобы текущая папка была `NeiroCthec`, иначе используйте:
+
+```bat
+cd /d "C:\Users\...\Documents\[01] My Projects\NeiroCthec"
+docker compose config
+docker compose up -d
+docker compose ps -a
+docker compose logs -f api
+```
+
+---
+
+### 8. Частые проблемы
 
 - **Финальный WAV не собирается (фрагменты line_*.wav есть)**:
   - финальный WAV собирает **Core API** (не TTS). TTS только синтезирует фрагменты, Stage4 сохраняет их в `storage/books/.../lines/`, Core склеивает в `final.wav`.
@@ -176,4 +210,17 @@ docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile 
     docker compose logs -f api
     docker compose logs -f web
     ```
+
+---
+
+### Корзина книг и очистка через 7 дней
+
+Удалённые книги (раздел «Мои книги» → «Корзина») хранятся в БД 7 дней. Пользователь может восстановить книгу до истечения срока — тогда запись и файлы остаются. Чтобы безвозвратно удалять книги из корзины через 7 дней, настройте вызов по расписанию:
+
+1. В `frontend/apps/api/.env` задайте секрет: `CRON_SECRET=ваш_секретный_токен`.
+2. Раз в день вызывайте (с хоста или из cron в контейнере):
+   ```bash
+   curl -X POST -H "X-Cron-Secret: ваш_секретный_токен" http://localhost:4000/api/books/purge-trash
+   ```
+   В Docker, если API доступен по имени сервиса: `http://api:4000/api/books/purge-trash`.
 

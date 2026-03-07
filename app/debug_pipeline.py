@@ -10,8 +10,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from core.pipeline.stage1_parser import StructuralParser
 from core.pipeline.stage2_speaker import SpeakerResolver
 from core.pipeline.stage3_emotion import EmotionResolver
-from core.pipeline.stage4_voice import VoiceSynthesizer
-# Добавляем Stage 4.5 обратно
+# Stage 4 (Coqui TTS) удалён — TTS только через Qwen3 (tts_engine_service)
 from core.pipeline.stage4_5_enhancer import create_enhancer
 from core.pipeline.stage5_tts import Stage5Assembler
 
@@ -89,10 +88,15 @@ def debug_stage_4_detailed(ubf, audio_dir):
         seg_info = f" [сегмент {line.segment_index + 1}/{line.segment_total}]" if line.is_segment else ""
         print(f"  {i}. Line {line.idx}{seg_info} ({line.speaker}): {line.original[:70]}...")
 
-    # Создаем синтезатор
+    # Создаем синтезатор (Coqui удалён — только Qwen3)
     try:
+        from core.pipeline.stage4_voice import VoiceSynthesizer
         synthesizer = VoiceSynthesizer()
+    except RuntimeError as e:
+        print(f"\n⚠️  {e}")
+        return False
 
+    try:
         successful_tests = 0
         for i, line in enumerate(test_lines, 1):
             print(f"\n📝 Тест {i}/{len(test_lines)}: Line {line.idx}")
@@ -298,106 +302,113 @@ def run_pipeline():
     print("STAGE 4: ПОЛНЫЙ СИНТЕЗ РЕЧИ")
     print("=" * 40)
 
-    synthesizer = VoiceSynthesizer()
-
     try:
-        # Создаем поддиректорию для сырых файлов
-        raw_dir = audio_dir / "raw"
-        raw_dir.mkdir(exist_ok=True)
+        from core.pipeline.stage4_voice import VoiceSynthesizer
+        synthesizer = VoiceSynthesizer()
+    except RuntimeError as e:
+        print(f"\n⚠️  {e}")
+        print("   Пропуск Stage 4 в debug_pipeline. Используйте stage4 worker + Qwen3 для озвучки.")
+        synthesizer = None
 
-        print(f"Начинаю полный синтез {len(ubf.lines)} строк...")
-        start_time = time.time()
+    if synthesizer is not None:
+        try:
+            # Создаем поддиректорию для сырых файлов
+            raw_dir = audio_dir / "raw"
+            raw_dir.mkdir(exist_ok=True)
 
-        synthesizer.process(ubf, out_dir=raw_dir)
+            print(f"Начинаю полный синтез {len(ubf.lines)} строк...")
+            start_time = time.time()
 
-        elapsed = time.time() - start_time
-        print(f"✅ Синтез завершён за {elapsed:.1f} секунд")
+            synthesizer.process(ubf, out_dir=raw_dir)
 
-        # Проверяем созданные файлы
-        wav_files = list(raw_dir.glob("*.wav"))
-        print(f"  Создано файлов: {len(wav_files)}")
+            elapsed = time.time() - start_time
+            print(f"✅ Синтез завершён за {elapsed:.1f} секунд")
 
-        if wav_files:
-            print("  Примеры файлов:")
-            for file in wav_files[:3]:
-                file_size_kb = file.stat().st_size / 1024
-                print(f"    {file.name} ({file_size_kb:.1f} KB)")
+            # Проверяем созданные файлы
+            wav_files = list(raw_dir.glob("*.wav"))
+            print(f"  Создано файлов: {len(wav_files)}")
 
-            # Проверяем что файлы не пустые
-            print("  Проверка файлов на пустоту:")
-            empty_files = 0
-            for file in wav_files[:5]:  # Проверяем первые 5
-                file_size = file.stat().st_size
-                if file_size < 1024:  # Меньше 1KB
-                    print(f"    ⚠️  {file.name}: пустой ({file_size} байт)")
-                    empty_files += 1
+            if wav_files:
+                print("  Примеры файлов:")
+                for file in wav_files[:3]:
+                    file_size_kb = file.stat().st_size / 1024
+                    print(f"    {file.name} ({file_size_kb:.1f} KB)")
+
+                # Проверяем что файлы не пустые
+                print("  Проверка файлов на пустоту:")
+                empty_files = 0
+                for file in wav_files[:5]:  # Проверяем первые 5
+                    file_size = file.stat().st_size
+                    if file_size < 1024:  # Меньше 1KB
+                        print(f"    ⚠️  {file.name}: пустой ({file_size} байт)")
+                        empty_files += 1
+                    else:
+                        print(f"    ✅ {file.name}: OK ({file_size} байт)")
+
+                if empty_files > 0:
+                    print(f"  ⚠️  Найдено {empty_files} пустых файлов!")
+
+            # Обновляем audio_path в строках для Stage 4.5 и 5
+            files_found = 0
+            for line in ubf.lines:
+                if line.is_segment:
+                    base_id = line.base_line_id if line.base_line_id is not None else line.idx
+                    seg_idx = line.segment_index or 0
+                    expected_file = raw_dir / f"{base_id:05d}_{line.speaker or 'narrator'}_seg{seg_idx}.wav"
                 else:
-                    print(f"    ✅ {file.name}: OK ({file_size} байт)")
+                    expected_file = raw_dir / f"{line.idx:05d}_{line.speaker or 'narrator'}.wav"
 
-            if empty_files > 0:
-                print(f"  ⚠️  Найдено {empty_files} пустых файлов!")
-
-        # Обновляем audio_path в строках для Stage 4.5 и 5
-        files_found = 0
-        for line in ubf.lines:
-            if line.is_segment:
-                base_id = line.base_line_id if line.base_line_id is not None else line.idx
-                seg_idx = line.segment_index or 0
-                expected_file = raw_dir / f"{base_id:05d}_{line.speaker or 'narrator'}_seg{seg_idx}.wav"
-            else:
-                expected_file = raw_dir / f"{line.idx:05d}_{line.speaker or 'narrator'}.wav"
-
-            if expected_file.exists():
-                line.audio_path = str(expected_file)
-                files_found += 1
-            else:
-                # Пробуем найти файл с другим именем
-                pattern = f"*{line.idx:05d}*{line.speaker or 'narrator'}*.wav"
-                matching_files = list(raw_dir.glob(pattern))
-                if matching_files:
-                    line.audio_path = str(matching_files[0])
+                if expected_file.exists():
+                    line.audio_path = str(expected_file)
                     files_found += 1
-                    print(f"  🔍 Найден альтернативный файл для line {line.idx}: {matching_files[0].name}")
+                else:
+                    # Пробуем найти файл с другим именем
+                    pattern = f"*{line.idx:05d}*{line.speaker or 'narrator'}*.wav"
+                    matching_files = list(raw_dir.glob(pattern))
+                    if matching_files:
+                        line.audio_path = str(matching_files[0])
+                        files_found += 1
+                        print(f"  🔍 Найден альтернативный файл для line {line.idx}: {matching_files[0].name}")
 
-        print(f"  Найдено audio_path: {files_found}/{len(ubf.lines)}")
+            print(f"  Найдено audio_path: {files_found}/{len(ubf.lines)}")
 
-    except Exception as e:
-        print(f"❌ Ошибка синтеза: {e}")
-        import traceback
-        traceback.print_exc()
+        except Exception as e:
+            print(f"❌ Ошибка синтеза: {e}")
+            import traceback
+            traceback.print_exc()
 
-        # Создаём тестовые файлы с тоном (не тишина)
-        print("\n⚠️  Создаю тестовые файлы с тоном...")
-        raw_dir = audio_dir / "raw"
-        raw_dir.mkdir(exist_ok=True)
+            # Создаём тестовые файлы с тоном (не тишина)
+            print("\n⚠️  Создаю тестовые файлы с тоном...")
+            raw_dir = audio_dir / "raw"
+            raw_dir.mkdir(exist_ok=True)
 
-        import numpy as np
-        import soundfile as sf
+            import numpy as np
+            import soundfile as sf
 
-        created_files = 0
-        for line in ubf.lines:
-            if line.is_segment:
-                base_id = line.base_line_id if line.base_line_id is not None else line.idx
-                seg_idx = line.segment_index or 0
-                filename = f"{base_id:05d}_{line.speaker or 'narrator'}_seg{seg_idx}.wav"
-            else:
-                filename = f"{line.idx:05d}_{line.speaker or 'narrator'}.wav"
+            created_files = 0
+            for line in ubf.lines:
+                if line.is_segment:
+                    base_id = line.base_line_id if line.base_line_id is not None else line.idx
+                    seg_idx = line.segment_index or 0
+                    filename = f"{base_id:05d}_{line.speaker or 'narrator'}_seg{seg_idx}.wav"
+                else:
+                    filename = f"{line.idx:05d}_{line.speaker or 'narrator'}.wav"
 
-            test_file = raw_dir / filename
+                test_file = raw_dir / filename
 
-            # Создаем тестовый аудио файл с тоном (не тишина!)
-            duration = 1.0  # секунда
-            sr = 22050
-            t = np.linspace(0, duration, int(sr * duration))
-            # Синусоида 440 Гц (нота Ля) с затуханием
-            audio = 0.5 * np.sin(2 * np.pi * 440 * t)
-            audio *= np.exp(-2 * t)  # Экспоненциальное затухание
+                # Создаем тестовый аудио файл с тоном (не тишина!)
+                duration = 1.0  # секунда
+                sr = 22050
+                t = np.linspace(0, duration, int(sr * duration))
+                # Синусоида 440 Гц (нота Ля) с затуханием
+                audio = 0.5 * np.sin(2 * np.pi * 440 * t)
+                audio *= np.exp(-2 * t)  # Экспоненциальное затухание
 
-            sf.write(test_file, audio, sr)
-            line.audio_path = str(test_file)
-            created_files += 1
+                sf.write(test_file, audio, sr)
+                line.audio_path = str(test_file)
+                created_files += 1
 
-        print(f"Создано {created_files} тестовых файлов с тоном 440 Гц")
+            print(f"Создано {created_files} тестовых файлов с тоном 440 Гц")
 
     # ========== STAGE 4.5 ==========
     print("\n" + "=" * 40)

@@ -55,6 +55,20 @@ REMARK_RE = re.compile(
     re.IGNORECASE
 )
 
+# Заголовки глав: «Глава N», «Chapter N», «Часть N», markdown # / ##
+CHAPTER_HEADER_RE = re.compile(
+    r'^\s*(?:'
+    r'#+\s*.*|'  # markdown ## Заголовок
+    r'Глава\s+\d+|'
+    r'Chapter\s+\d+|'
+    r'Часть\s+\d+|'
+    r'Часть\s+[IVXLCDM]+|'
+    r'Глава\s+[IVXLCDM]+|'
+    r'Chapter\s+[IVXLCDM]+'
+    r')\s*$',
+    re.IGNORECASE
+)
+
 
 class StructuralParser:
     """
@@ -113,7 +127,7 @@ class StructuralParser:
             return False
         return len(text) > self._optimal_max
 
-    def _split_for_xtts(self, text: str, line_idx: int, is_dialogue: bool = False) -> List[Line]:
+    def _split_for_xtts(self, text: str, line_idx: int, is_dialogue: bool = False, chapter_id: int = 1) -> List[Line]:
         """Разбивает текст на оптимальные сегменты для XTTS"""
         # 1. Сначала разбиваем на предложения
         sentences = self._split_into_sentences(text)
@@ -141,6 +155,7 @@ class StructuralParser:
                 segment_total=len(segments),
                 full_original=text if i == 0 else None,
                 base_line_id=base_id,  # 🔥 Базовый ID для всех сегментов одной строки
+                chapter_id=chapter_id,
                 speaker=None,
                 emotion=None,
                 audio_path=None
@@ -268,9 +283,10 @@ class StructuralParser:
         return final_parts
 
     def parse_file(self, book_path: Path) -> UserBookFormat:
-        """Парсинг файла с поддержкой сегментов"""
+        """Парсинг файла с поддержкой сегментов и разметки глав по заголовкам."""
         parsed_lines: List[Line] = []
         self._next_id = 0  # 🔥 Сбрасываем счетчик при каждом вызове
+        current_chapter = 1
 
         with book_path.open("r", encoding="utf-8") as f:
             for idx, raw in enumerate(f):
@@ -279,11 +295,17 @@ class StructuralParser:
                     continue
 
                 original = self._soft_clean(raw)
+                is_chapter_header = bool(CHAPTER_HEADER_RE.match(original))
+                # Текущая строка (и сегменты) принадлежит current_chapter; после заголовка увеличиваем счётчик для следующих
+                chapter_id = current_chapter
+                if is_chapter_header:
+                    current_chapter += 1
+
                 is_dialogue = bool(DIALOGUE_START_RE.match(original))
 
                 # Разбиваем как диалоги, так и повествование
                 if self.split_for_xtts and self._should_split_for_xtts(original):
-                    segment_lines = self._split_for_xtts(original, idx, is_dialogue)
+                    segment_lines = self._split_for_xtts(original, idx, is_dialogue, chapter_id=chapter_id)
                     parsed_lines.extend(segment_lines)
                 else:
                     # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная индексация
@@ -297,6 +319,7 @@ class StructuralParser:
                         segment_total=None,
                         full_original=None,
                         base_line_id=self._next_id,  # 🔥 Для несмегментированных строк base_id = id
+                        chapter_id=chapter_id,
                         speaker=None,
                         emotion=None,
                         audio_path=None

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import shutil
 import uuid
-from fastapi import APIRouter, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
 
 from api.schemas.book import BookUploadResponse, ChapterOut
 from core.book_convert import book_to_text
@@ -20,6 +20,20 @@ STORAGE_ROOT = Path(_storage_env) if _storage_env else _APP_ROOT / "storage"
 
 
 _PROJECT_ID_FILE = ".project_id"
+_TITLE_FILE = ".title"
+
+
+def _read_book_title(book_dir: Path) -> str:
+    """Читает название книги из .title в папке книги; иначе возвращает id папки."""
+    title_path = book_dir / _TITLE_FILE
+    if title_path.exists():
+        try:
+            t = title_path.read_text(encoding="utf-8").strip()
+            if t:
+                return t
+        except Exception:
+            pass
+    return book_dir.name
 
 
 def _find_existing_book_dir(user_id: str, filename: str, project_id: str | None = None) -> Path | None:
@@ -54,13 +68,17 @@ def upload_book(
     file: UploadFile = File(...),
     x_user_id: str | None = Header(None, alias="X-User-Id"),
     x_project_id: str | None = Header(None, alias="X-Project-Id"),
+    x_project_title: str | None = Header(None, alias="X-Project-Title"),
+    project_title_form: str | None = Form(None, alias="project_title"),
 ):
     """
     Загрузка файла книги: .txt, .fb2, .epub, .mobi.
-    X-User-Id — id пользователя. X-Project-Id — id проекта (Nest), чтобы при удалении проекта удалить и книги.
+    X-User-Id — id пользователя. X-Project-Id — id проекта (Nest).
+    Название книги: из формы project_title (поддерживает UTF-8) или заголовок X-Project-Title (только ASCII).
     """
     user_id = (x_user_id or "").strip() or "anonymous"
     project_id = (x_project_id or "").strip() or None
+    project_title = (project_title_form or x_project_title or "").strip() or None
     filename = file.filename or "upload.txt"
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_BOOK_EXTENSIONS:
@@ -100,6 +118,8 @@ def upload_book(
 
     if project_id:
         (book_dir / _PROJECT_ID_FILE).write_text(project_id, encoding="utf-8")
+    if project_title:
+        (book_dir / _TITLE_FILE).write_text(project_title, encoding="utf-8")
 
     chapters = [
         ChapterOut(chapter_id=1, title="Chapter 1")

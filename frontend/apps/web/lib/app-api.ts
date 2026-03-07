@@ -90,6 +90,8 @@ export type AppBookStatusResponse = {
   progress: number;
   total_lines: number;
   tts_done: number;
+  /** Номера глав, у которых все строки озвучены (для раннего воспроизведения). */
+  chapters_ready?: number[];
 };
 
 export type AppProcessBookStage4Response = {
@@ -151,6 +153,13 @@ export async function getBookStatus(bookId: string): Promise<AppBookStatusRespon
   return appJson<AppBookStatusResponse>(`/books/${encodeURIComponent(bookId)}/status`);
 }
 
+/** URL для проигрывания главы книги (GET /books/:id/chapters/:num). */
+export function getBookChapterAudioUrl(bookId: string, chapterNum: number): string {
+  const base = getAppApiUrl();
+  if (!base) return '';
+  return `${base}/books/${encodeURIComponent(bookId)}/chapters/${chapterNum}`;
+}
+
 /** DELETE /api/books/:id — удалить книгу с сервера */
 export async function deleteBook(bookId: string): Promise<{ status: string; book_id: string }> {
   return appJson<{ status: string; book_id: string }>(`/api/books/${encodeURIComponent(bookId)}`, { method: 'DELETE' });
@@ -182,6 +191,33 @@ export async function downloadBookAudio(bookId: string): Promise<{ blob: Blob; f
   const blob = await res.blob();
   const disposition = res.headers.get('Content-Disposition');
   let filename = `${bookId}.wav`;
+  if (disposition) {
+    const m = disposition.match(/filename="?([^";\n]+)"?/);
+    if (m) filename = m[1].trim();
+  }
+  return { blob, filename };
+}
+
+/**
+ * Стрим финализированной аудиокниги: GET /internal/audiobooks/stream?folder=... с X-User-Id.
+ * Используется для книг после «Создать аудиокнигу» (файл в storage/audiobooks).
+ */
+export async function getAudiobookStreamBlob(folder: string): Promise<{ blob: Blob; filename: string }> {
+  const res = await appFetch(
+    `/internal/audiobooks/stream?${new URLSearchParams({ folder }).toString()}`
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    let msg = text;
+    try {
+      const j = JSON.parse(text) as { detail?: string };
+      if (typeof j.detail === 'string') msg = j.detail;
+    } catch {}
+    throw new Error(msg || `HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition');
+  let filename = 'full.wav';
   if (disposition) {
     const m = disposition.match(/filename="?([^";\n]+)"?/);
     if (m) filename = m[1].trim();

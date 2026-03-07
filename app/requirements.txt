@@ -11,9 +11,8 @@ soundfile
 torch==2.2.2
 torchaudio==2.2.2
 
-# TTS
+# Только Qwen3-TTS (tts_engine_service), Coqui TTS удалён
 transformers==4.36.2
-TTS==0.22.0
 
 # Русский NLP
 razdel>=0.5.0

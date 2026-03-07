@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiJson } from './api';
-import { getAccessToken, getStoredUserId } from './auth';
+import { getAccessToken } from './auth';
 
 export type User = {
   id: string;
@@ -12,14 +12,9 @@ type MeResponse = {
   user: User;
 };
 
-/** Пользователь по умолчанию, когда бэкенд не отдаёт /api/users/me (например, только app API без сервиса авторизации). */
-function fallbackUser(): User {
-  const id = getStoredUserId() ?? 'dev-user';
-  return { id, email: id, role: 'user' };
-}
-
 /**
- * Хук для получения информации о текущем пользователе
+ * Хук для получения информации о текущем пользователе.
+ * Анонимных пользователей нет: при отсутствии токена или ошибке API (в т.ч. 404/401) возвращает user=null.
  */
 export function useUser() {
   const [user, setUser] = useState<User | null>(null);
@@ -46,14 +41,8 @@ export function useUser() {
         }
       } catch (e: any) {
         if (!cancelled) {
-          const msg = e?.message ?? String(e);
-          if (msg.includes('404') || msg.includes('Not Found')) {
-            setUser(fallbackUser());
-            setError(null);
-          } else {
-            setUser(null);
-            setError(e);
-          }
+          setUser(null);
+          setError(e instanceof Error ? e : new Error(String(e)));
         }
       } finally {
         if (!cancelled) {

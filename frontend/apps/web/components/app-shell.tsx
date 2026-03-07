@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { clearAccessToken, getAccessToken } from '../lib/auth';
+import { clearAccessToken, getAccessToken, setAccessToken } from '../lib/auth';
 import { apiJson } from '../lib/api';
 import { useEffect } from 'react';
 import { useUser } from '../lib/use-user';
@@ -49,6 +49,14 @@ export function AppShell(props: { children: React.ReactNode }) {
       return;
     }
   }, [router, isLoadingUser, user, error]);
+
+  // Поддерживаем cookie для middleware: при валидной сессии без cookie выставляем (для старых сессий)
+  useEffect(() => {
+    const token = getAccessToken();
+    if (token && typeof document !== 'undefined' && !document.cookie.includes('neurochtec_signed_in=1')) {
+      setAccessToken(token);
+    }
+  }, [user]);
 
   async function logout() {
     try {
