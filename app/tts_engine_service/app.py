@@ -266,14 +266,20 @@ def _init_qwen3() -> None:
 
     cuda_ok, cuda_name = _gpu_runtime_status()
     use_gpu = _device_preference() == "cuda"
-    device_map = "cuda:0" if use_gpu else "cpu"
+    # Используем "auto" для автоматического размещения на доступных устройствах
+    device_map = "auto" if use_gpu else "cpu"
     if cuda_ok:
         logger.info("GPU detected: %s (PyTorch CUDA/ROCm). TTS_DEVICE=%s -> use_gpu=%s", cuda_name, os.getenv("TTS_DEVICE", "auto"), use_gpu)
     else:
         logger.info("GPU not available (torch.cuda.is_available()=False). Install PyTorch with CUDA or ROCm for AMD. Using CPU.")
     dtype = getattr(torch, "bfloat16", torch.float16)
-    # На AMD ROCm flash_attention_2 может быть недоступен — пробуем sdpa
-    attn_candidates = (["flash_attention_2", "sdpa"] if use_gpu else ["sdpa"])
+    # На AMD ROCm flash_attention_2 недоступен — используем sdpa
+    # TTS_ATTN_IMPL: sdpa, eager — или auto для автовыбора (flash_attention_2 отключен для совместимости)
+    attn_env = os.getenv("TTS_ATTN_IMPL", "sdpa").strip().lower()
+    if attn_env == "auto":
+        attn_candidates = ["sdpa", "eager"]
+    else:
+        attn_candidates = [attn_env]
     last_exc: Exception | None = None
 
     for attn in attn_candidates:
@@ -284,9 +290,12 @@ def _init_qwen3() -> None:
                 dtype=dtype,
                 attn_implementation=attn,
             )
-            if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "true").lower() in ("1", "true", "yes"):
-                _QWEN3 = torch.compile(_QWEN3, mode="reduce-overhead")
-                logger.info("Qwen3-TTS torch.compile enabled")
+            if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "false").lower() in ("1", "true", "yes"):
+                try:
+                    _QWEN3 = torch.compile(_QWEN3, mode="reduce-overhead")
+                    logger.info("Qwen3-TTS torch.compile enabled")
+                except Exception as compile_exc:
+                    logger.warning("torch.compile skipped: %s", compile_exc)
             _QWEN3_ERROR = None
             _QWEN3_ACTIVE_DEVICE = "cuda" if use_gpu else "cpu"
             logger.info("Qwen3-TTS init OK: model=%s device=%s attn=%s", _QWEN3_MODEL_NAME, _QWEN3_ACTIVE_DEVICE, attn)
@@ -309,8 +318,12 @@ def _init_qwen3() -> None:
                 dtype=dtype,
                 attn_implementation="sdpa",
             )
-            if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "true").lower() in ("1", "true", "yes"):
-                _QWEN3 = torch.compile(_QWEN3, mode="reduce-overhead")
+            if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "false").lower() in ("1", "true", "yes"):
+                try:
+                    _QWEN3 = torch.compile(_QWEN3, mode="reduce-overhead")
+                    logger.info("Qwen3-TTS torch.compile enabled (CPU fallback)")
+                except Exception as compile_exc:
+                    logger.warning("torch.compile skipped: %s", compile_exc)
             _QWEN3_ERROR = None
             _QWEN3_ACTIVE_DEVICE = "cpu"
             logger.warning("Qwen3-TTS fallback to CPU after GPU init failure")
@@ -334,7 +347,7 @@ def _init_qwen3_base() -> bool:
         _QWEN3_BASE_ERROR = str(exc)
         return False
     use_gpu = _device_preference() == "cuda"
-    device_map = "cuda:0" if use_gpu else "cpu"
+    device_map = "auto" if use_gpu else "cpu"
     dtype = getattr(torch, "bfloat16", torch.float16)
     try:
         _QWEN3_BASE = Qwen3TTSModel.from_pretrained(
@@ -343,10 +356,14 @@ def _init_qwen3_base() -> bool:
             dtype=dtype,
             attn_implementation="sdpa",
         )
-        if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "true").lower() in ("1", "true", "yes"):
-            _QWEN3_BASE = torch.compile(_QWEN3_BASE, mode="reduce-overhead")
+        if hasattr(torch, "compile") and os.getenv("TTS_TORCH_COMPILE", "false").lower() in ("1", "true", "yes"):
+            try:
+                _QWEN3_BASE = torch.compile(_QWEN3_BASE, mode="reduce-overhead")
+                logger.info("Qwen3-TTS Base torch.compile enabled")
+            except Exception as compile_exc:
+                logger.warning("torch.compile skipped for Base model: %s", compile_exc)
         _QWEN3_BASE_ERROR = None
-        logger.info("Qwen3-TTS Base (voice clone) loaded: %s", _QWEN3_BASE_MODEL_NAME)
+        logger.info("Qwen3-TTS Base (voice clone) loaded: %s on %s", _QWEN3_BASE_MODEL_NAME, device_map)
         return True
     except Exception as exc:
         _QWEN3_BASE_ERROR = str(exc)

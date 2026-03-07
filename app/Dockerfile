@@ -25,9 +25,10 @@ RUN pip install --no-cache-dir \
     torchaudio==2.2.2 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# Устанавливаем flash-attn для ускоренной инференции
-RUN pip install --no-cache-dir packaging ninja
-RUN pip install --no-cache-dir flash-attn --no-build-isolation
+# Опционально: flash-attn для ускоренной инференции на NVIDIA.
+# Если сборка не удаётся (CUDA/драйвер/память) — образ всё равно соберётся, TTS будет использовать sdpa.
+RUN pip install --no-cache-dir packaging ninja \
+    && (pip install --no-cache-dir flash-attn --no-build-isolation || echo "flash-attn skipped, TTS will use sdpa")
 
 # Устанавливаем остальные зависимости
 COPY requirements.txt /app/requirements.txt
