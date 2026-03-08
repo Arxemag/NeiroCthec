@@ -25,6 +25,8 @@ RUN pip install --no-cache-dir TTS==0.22.0
 COPY . /app
 WORKDIR /app
 
+# Принять лицензию Coqui неинтерактивно (в контейнере нет stdin)
+ENV COQUI_TOS_AGREED=1
 ENV TTS_ENGINE_PORT=8021
 EXPOSE 8021
 CMD ["python", "-m", "tts_engine_xtts.app"]

@@ -2,7 +2,8 @@
 # torch 2.2.2 + torchaudio 2.2.2 избегают torchcodec (FFmpeg DLL) на Windows
 torch==2.2.2
 torchaudio==2.2.2
-# Coqui TTS
+# Coqui TTS (требует transformers с BeamSearchScorer — в 4.44+ API изменился)
+transformers>=4.33.0,<4.44.0
 TTS==0.22.0
 # Сервис
 fastapi

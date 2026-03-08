@@ -14,6 +14,10 @@ docker compose up -d
 
 Требуется **NVIDIA GPU** и [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
 
+При первом запуске контейнера модель XTTS v2 скачивается в volume (порядка 1.5–2 ГБ); в это время запросы к `POST /synthesize` могут возвращать **503**. Дождитесь окончания загрузки в логах (`docker compose logs -f tts-xtts`) и проверьте `GET /health` — при `xtts_ready: true` синтез будет отвечать 200.
+
+**Если модель уже скачана («is already downloaded»), но 503 не пропадает:** проверьте ответ `GET /health` — в нём есть поля `xtts_ready`, `xtts_error`, `xtts_loading`. Если `xtts_error` не пустое — загрузка в память упала (например, нехватка GPU-памяти или ошибка CUDA). Просмотрите полные логи: `docker compose logs tts-xtts 2>&1 | tail -80` — после строки «already downloaded» может быть traceback. Загрузка модели в GPU может занимать 1–2 минуты; несколько первых запросов подряд могут получать 503, пока модель не поднимется в память — подождите и повторите запрос или проверьте health.
+
 ## Контракт
 
 - **GET /health** — статус (xtts_ready, xtts_error, xtts_loading).
@@ -24,8 +28,9 @@ docker compose up -d
 
 ## Переменные окружения (контейнер)
 
+- `COQUI_TOS_AGREED=1` — принять лицензию Coqui неинтерактивно (в Docker нет stdin; задаётся в Dockerfile и compose).
 - `TTS_ENGINE_PORT` — порт (по умолчанию 8021).
-- `TTS_USE_GPU` — `true`/`false` (по умолчанию `true` для CUDA).
+- `TTS_USE_GPU` — `true`/`false`. Если в `/health` видите `xtts_error: "CUDA is not availabe on this machine."`, задайте `TTS_USE_GPU=false` в окружении контейнера — модель поднимется на CPU (медленнее, но синтез будет работать). В `docker-compose.yml` по умолчанию выставлено `false` для совместимости с машинами без NVIDIA.
 - `TTS_XTTS_LOG_LEVEL` — уровень логирования.
 
 Stage4 при выборе пользователем движка XTTS2 обращается по `EXTERNAL_TTS_XTTS_URL` (в compose по умолчанию `http://tts-xtts:8021`).

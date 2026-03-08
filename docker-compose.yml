@@ -101,12 +101,15 @@ services:
     ports:
       - "8021:8021"
     environment:
+      - COQUI_TOS_AGREED=1
+      - TTS_USE_GPU=false
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - TTS_ENGINE_PORT=8021
     volumes:
       - ./app/storage:/app/storage
       - tts_xtts_cache:/root/.cache/tts
+      - tts_xtts_data:/root/.local/share/tts
     deploy:
       resources:
         reservations:
@@ -186,5 +189,6 @@ volumes:
   miniodata:
   tts_cache:
   tts_xtts_cache:
+  tts_xtts_data:
   frontend_node_modules:
   frontend_web_next:
