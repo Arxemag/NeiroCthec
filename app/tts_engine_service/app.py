@@ -183,6 +183,8 @@ class SynthesizeRequest(BaseModel):
     audio_config: dict | None = None
     """Текстовое описание голоса для VoiceDesign, например: «низкий мужской голос, спокойный»."""
     voice_description: str | None = None
+    """Готовый путь к WAV образца голоса (для XTTS2 и voice clone). Имеет приоритет над speaker/voice_ids."""
+    speaker_wav_path: str | None = None
 
 
 class VoiceInfo(BaseModel):
@@ -198,6 +200,7 @@ class SynthesizeBatchItem(BaseModel):
     language: str | None = None
     voice_sample: str | None = None
     audio_config: dict | None = None
+    speaker_wav_path: str | None = None
 
 
 class SynthesizeBatchRequest(BaseModel):
@@ -460,6 +463,8 @@ def _speaker_sample_for(speaker: str) -> str | None:
 
 
 def _resolve_coqui_speaker_wav(request: SynthesizeRequest) -> str | None:
+    if request.speaker_wav_path and Path(request.speaker_wav_path).exists():
+        return request.speaker_wav_path
     resolved = _resolve_shared_voice_sample_path(request.voice_sample)
     if resolved:
         return resolved
@@ -762,6 +767,7 @@ def _batch_item_to_request(item: SynthesizeBatchItem) -> SynthesizeRequest:
         language=item.language,
         voice_sample=item.voice_sample,
         audio_config=item.audio_config,
+        speaker_wav_path=item.speaker_wav_path,
     )
 
 

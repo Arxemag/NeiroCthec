@@ -1,6 +1,6 @@
 ### Запуск НейроЧтец в Docker (dev)
 
-Ниже — минимальный набор команд, чтобы поднять **весь стек через Docker**, оставив **TTS Qwen3** локальным (AMD) или в отдельном контейнере (NVIDIA).
+Ниже — минимальный набор команд, чтобы поднять **весь стек через Docker**. **XTTS2** работает только в контейнере `tts-xtts` (порт 8021). **Qwen3** по умолчанию — локально на хосте (8020); при необходимости можно поднять и его в Docker (профиль `nvidia-tts`).
 
 ---
 
@@ -31,13 +31,13 @@ cd NeiroCthec
 docker compose up -d
 ```
 
-Будут запущены: **postgres**, **redis**, **minio**, **core**, **stage4**, **api**, **worker**, **web**. Контейнер **tts** (NVIDIA) по умолчанию не стартует — он в профиле `nvidia-tts`. На машине с AMD после этого нужно только поднять локальный TTS (см. раздел 4, вариант A). На машине с NVIDIA можно дополнительно включить TTS:
+Будут запущены: **postgres**, **redis**, **minio**, **core**, **stage4**, **api**, **worker**, **web**, **tts-xtts** (порт 8021). **tts-qwen3** (порт 8020) по умолчанию не стартует — он в профиле `nvidia-tts`; Qwen3 ожидается локально на хосте (`EXTERNAL_TTS_QWEN3_URL=http://host.docker.internal:8020`). XTTS2 всегда в контейнере: Stage4 обращается к нему по `EXTERNAL_TTS_XTTS_URL=http://tts-xtts:8021`.
+
+Чтобы поднять и Qwen3 в Docker (оба TTS в контейнерах):
 
 ```bat
-docker compose --profile nvidia-tts up -d
+docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile nvidia-tts up -d
 ```
-
-и при необходимости направить Stage4 на контейнер TTS через переменную `EXTERNAL_TTS_URL=http://tts:8020` (например, в `docker-compose.override.yml` для сервиса `stage4`).
 
 Остановка всего стека:
 
@@ -90,44 +90,22 @@ docker compose up -d core stage4
 
 ---
 
-### 5. TTS Qwen3
+### 5. TTS: Qwen3 (8020) и XTTS2 (8021)
 
-Используется **только модель Base 4-bit** (`divyajot5005/Qwen3-TTS-12Hz-1.7B-Base-BNB-4bit`): синтез только по образцу голоса (voice clone). Для каждого запроса нужен WAV в `storage/voices` или в запросе (`voice_sample` / голос из настроек). Для 4-bit в окружении должны быть установлены `bitsandbytes` и `accelerate`.
+Два движка: **Qwen3** (порт 8020) и **XTTS2 / Coqui** (порт 8021). На фронте в настройках проекта можно выбрать движок; Stage4 по полю `tts_engine` в задаче вызывает соответствующий URL.
 
-#### Вариант A — локальный TTS на AMD (рекомендуется для вас)
+- **EXTERNAL_TTS_QWEN3_URL** — адрес Qwen3 (по умолчанию `http://host.docker.internal:8020` — локальный процесс на хосте).
+- **EXTERNAL_TTS_XTTS_URL** — адрес XTTS2 (по умолчанию `http://tts-xtts:8021` — контейнер в том же compose).
 
-Запускается **вне Docker** на хосте:
+#### TTS Qwen3 (локально или в Docker)
 
-```bat
-cd app
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pip install "bitsandbytes>=0.42.0" accelerate
-python -m tts_engine_service.app    # слушает порт 8020
-```
+Модель Base 4-bit (`divyajot5005/Qwen3-TTS-12Hz-1.7B-Base-BNB-4bit`): синтез по образцу голоса (voice clone). По умолчанию Stage4 обращается к хосту (`host.docker.internal:8020`) — запустите локально: `cd app`, `.venv\Scripts\activate`, `python -m tts_engine_service.app`. Чтобы поднять Qwen3 в Docker: `docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile nvidia-tts up -d` (см. выше).
 
-При проблемах с 4-bit на ROCm можно переопределить модель: `set TTS_QWEN3_BASE_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base` (полная Base без квантизации).
+#### TTS XTTS2 (только Docker)
 
-Stage4 в контейнере по умолчанию обращается к TTS по адресу:
+XTTS2 работает **только в контейнере** `tts-xtts` (порт 8021). Контейнер входит в стандартный пул и собирается вместе с остальными при `docker compose up -d`. Stage4 обращается к нему по `http://tts-xtts:8021`. Подробнее: [docs/TTS_XTTS2.md](docs/TTS_XTTS2.md).
 
-```text
-EXTERNAL_TTS_URL=http://host.docker.internal:8020
-```
-
-то есть к локальному TTS на хосте.
-
-#### Вариант B — TTS в Docker (для NVIDIA‑машины коллеги)
-
-Из корня проекта:
-
-```bat
-docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile nvidia-tts up -d
-```
-
-Файл `docker-compose.nvidia-tts.yml` переопределяет `EXTERNAL_TTS_URL=http://tts:8020`, чтобы Stage4 обращался к контейнеру TTS, а не к хосту. Образ TTS уже включает `bitsandbytes` и `accelerate` для 4-bit модели.
-
-#### Несколько воркеров Stage4 (вариант A)
+#### Несколько воркеров Stage4
 
 В `docker-compose.yml` у сервиса `stage4` задано `deploy.replicas: 2`. Все реплики обращаются к одному Core (`tts-next` / `tts-next-batch`); каждая задача выдаётся один раз. Чтобы поднять больше воркеров (2–4 в зависимости от нагрузки):
 
@@ -181,11 +159,11 @@ docker compose logs -f api
   - проверьте, что Core и Stage4 используют один и тот же storage: в `docker-compose` задан `APP_STORAGE_ROOT=/app/storage` для обоих.
   - если Core перезапускался после озвучки — состояние пайплайна (`_book_states`) в памяти теряется, сборка не сработает. Перезапустите озвучку книги.
   - фронтенд должен вызывать Core (порт 8000) для скачивания: `NEXT_PUBLIC_APP_API_URL=http://localhost:8000`. Скачивание (`GET /books/:id/download`) запускает сборку.
-  - при TTS в Docker: используйте `docker-compose.nvidia-tts.yml`, чтобы Stage4 обращался к `http://tts:8020`.
+  - при Qwen3 в Docker: используйте `docker-compose.nvidia-tts.yml` с профилем `nvidia-tts`, чтобы Stage4 обращался к `http://tts-qwen3:8020`. XTTS2 всегда идёт на `http://tts-xtts:8021`.
 
 - **Core API или Stage4 не видят TTS**:
-  - убедитесь, что TTS слушает `http://localhost:8020` (локально) или контейнер `tts` запущен и `EXTERNAL_TTS_URL` указывает на `http://tts:8020`;
-  - на Windows для доступа из контейнера к хосту используйте `host.docker.internal`.
+  - Qwen3 по умолчанию на хосте (8020), XTTS2 — в контейнере `tts-xtts` (8021). Убедитесь, что контейнер `tts-xtts` запущен и переменные `EXTERNAL_TTS_QWEN3_URL`, `EXTERNAL_TTS_XTTS_URL` заданы для stage4;
+  - на Windows для доступа из контейнера к локальному Qwen3 используйте `host.docker.internal`.
 
 - **Ошибки api/worker (EEXIST, symlink, napi-postinstall)**:
   - зависимости фронта один раз ставит сервис `frontend_deps`; после него стартуют `api`, `worker`, `web`. Если в volume остался старый `node_modules`, удалите его и поднимите стек заново:

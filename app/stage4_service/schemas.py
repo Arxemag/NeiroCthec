@@ -19,6 +19,8 @@ class TTSRequest(BaseModel):
     speaker: str  # narrator | male | female
     emotion: Optional[dict[str, Any]] = None
     audio_config: Optional[dict[str, Any]] = None
+    speaker_wav_path: Optional[str] = None  # путь к WAV для XTTS2 / voice clone
+    tts_engine: Optional[str] = None  # qwen3 | xtts2, для выбора URL
 
 
 class TTSResponse(BaseModel):

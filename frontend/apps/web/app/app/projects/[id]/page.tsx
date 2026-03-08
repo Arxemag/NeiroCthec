@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, FileUp, Pause, Pencil, Play, Trash2, X } from 'lucide-react';
 import { apiJson } from '../../../../lib/api';
 import { getAccessToken, getStoredUserId } from '../../../../lib/auth';
-import { isAppApiEnabled, getAppApiUrl, getBookChapterAudioUrl, listVoices, listBooksByProject, appFetch, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject, type AppBook } from '../../../../lib/app-api';
+import { isAppApiEnabled, getAppApiUrl, getBookChapterAudioUrl, listVoices, listBooksByProject, appFetch, appJson, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject, type AppBook, type TtsEngine } from '../../../../lib/app-api';
 import { Button } from '../../../../components/ui';
 import { useParams, useRouter } from 'next/navigation';
 import { cacheProjectFile, getCachedFile, createFileFromCache, hasCachedFile } from '../../../../lib/file-cache';
@@ -78,6 +78,8 @@ export default function ProjectPage() {
   const [lastUploadedBookId, setLastUploadedBookId] = useState<string | null>(null);
   /** Blob URL финального аудио книги (GET /books/{id}/download), показывается в «Предпрослушать результат». */
   const [finalBookAudioUrl, setFinalBookAudioUrl] = useState<string | null>(null);
+  /** Движок TTS: qwen3 или xtts2 (сохраняется в /books/settings/audio). */
+  const [ttsEngine, setTtsEngine] = useState<TtsEngine>('qwen3');
   const finalBookAudioUrlRef = useRef<string | null>(null);
   /** Список книг проекта из App API (загруженные текстовые файлы). */
   const [projectBooks, setProjectBooks] = useState<AppBook[]>([]);
@@ -291,6 +293,14 @@ export default function ProjectPage() {
           }
         } catch (e) {
           console.warn('[App API] listBooksByProject failed:', e);
+        }
+        // Загружаем настройки аудио (в т.ч. tts_engine)
+        try {
+          const audioSettings = await appJson<{ config?: { tts_engine?: string } }>('/books/settings/audio').catch(() => ({ config: {} }));
+          const engine = audioSettings?.config?.tts_engine;
+          if (engine === 'xtts2' || engine === 'qwen3') setTtsEngine(engine);
+        } catch {
+          /* ignore */
         }
       } else {
         setProjectBooks([]);
@@ -529,8 +539,8 @@ export default function ProjectPage() {
       setFinalBookAudioUrl(null);
       setChaptersReadyFromApp([]);
       try {
-        await putAudioConfigVoiceIds(selectedVoiceIds);
-        await processBookStage4(lastUploadedBookId, 500, selectedVoiceIds);
+        await putAudioConfigVoiceIds(selectedVoiceIds, { ttsEngine });
+        await processBookStage4(lastUploadedBookId, 500, selectedVoiceIds, ttsEngine);
         startAppProgressTracking(lastUploadedBookId);
       } catch (e: any) {
         const msg = e?.message ?? '';
@@ -1202,6 +1212,41 @@ export default function ProjectPage() {
                 Этот проект завершен и недоступен для редактирования. Готовая аудиокнига доступна в разделе "Мои книги".
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Движок TTS: Qwen3 или XTTS2 */}
+      {!isCompleted && isAppApiEnabled() && (
+        <div className="space-y-2">
+          <div className="text-base font-medium text-text">Движок TTS</div>
+          <div className="flex flex-wrap gap-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="tts_engine"
+                checked={ttsEngine === 'qwen3'}
+                onChange={() => {
+                  setTtsEngine('qwen3');
+                  putAudioConfigVoiceIds(selectedVoiceIds, { ttsEngine: 'qwen3' }).catch(() => {});
+                }}
+                className="cursor-pointer"
+              />
+              <span className="text-sm text-text">Qwen3</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="tts_engine"
+                checked={ttsEngine === 'xtts2'}
+                onChange={() => {
+                  setTtsEngine('xtts2');
+                  putAudioConfigVoiceIds(selectedVoiceIds, { ttsEngine: 'xtts2' }).catch(() => {});
+                }}
+                className="cursor-pointer"
+              />
+              <span className="text-sm text-text">XTTS2</span>
+            </label>
           </div>
         </div>
       )}

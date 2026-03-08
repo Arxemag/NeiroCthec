@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse
 
 from core.models import UserBookFormat, Line, EmotionProfile, Remark
 from core.pipeline.stage1_parser import StructuralParser
+from core.voices import get_voice_path
 from core.pipeline.stage2_speaker import SpeakerResolver
 from core.pipeline.stage3_emotion import EmotionResolver
 from core.pipeline.stage5_tts import Stage5Assembler
@@ -31,8 +32,8 @@ _APP_ROOT = Path(__file__).resolve().parent.parent.parent
 _storage_env = os.environ.get("APP_STORAGE_ROOT") or os.environ.get("CORE_STORAGE_PATH")
 STORAGE_ROOT = Path(_storage_env) if _storage_env else _APP_ROOT / "storage"
 
-# In-memory настройки голосов
-_audio_settings: dict = {"config": {"voice_ids": {}}}
+# In-memory настройки голосов (tts_engine: qwen3 | xtts2)
+_audio_settings: dict = {"config": {"voice_ids": {}, "tts_engine": "qwen3"}}
 
 # Состояние пайплайна по книгам: (user_id, book_id) -> BookPipelineState
 # BookPipelineState: dict с keys: lines, pending, done, stop_requested, voice_ids
@@ -539,6 +540,10 @@ def post_process_book_stage4(
         voice_ids = {k: v for k, v in voice_ids.items() if v}
     else:
         voice_ids = {}
+    config = _audio_settings.get("config") or {}
+    tts_engine = (body or {}).get("tts_engine") or config.get("tts_engine") or "qwen3"
+    if tts_engine not in ("qwen3", "xtts2"):
+        tts_engine = "qwen3"
 
     book_dir = _book_dir(user_id, book_id)
     if not book_dir:
@@ -583,6 +588,7 @@ def post_process_book_stage4(
         # Если для роли выбран конкретный voiceId, передаём его как speaker в TTS;
         # иначе оставляем роль (narrator/male/female), и движок возьмёт дефолтный голос.
         voice_for_tts = voice_override or role
+        speaker_wav_path = get_voice_path(voice_for_tts)
         lines_data.append({
             "line_id": line.idx,
             "text": line.original.strip(),
@@ -591,6 +597,8 @@ def post_process_book_stage4(
             "emotion": _emotion_to_dict(line.emotion),
             "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
             "chapter_id": (line.chapter_id if line.chapter_id is not None else 1),
+            "tts_engine": tts_engine,
+            "speaker_wav_path": speaker_wav_path,
         })
 
     # Переиспользование уже озвученных строк: если line_{id}.wav есть и голос роли не менялся — в done, иначе в pending.
@@ -633,6 +641,7 @@ def post_process_book_stage4(
             "done": done,
             "stop_requested": False,
             "voice_ids": effective_voice_ids,
+            "tts_engine": tts_engine,
         }
         # Добавляем в очередь на выдачу только если есть что озвучивать (без дубликатов подряд)
         if pending and key not in _pending_books:
@@ -679,7 +688,7 @@ def post_tts_next():
             user_id, book_id = key
             task_id = f"{book_id}_{line_id}"
             _last_leased = {"user_id": user_id, "book_id": book_id, "line_id": line_id}
-            return {
+            result = {
                 "task_id": task_id,
                 "user_id": user_id,
                 "book_id": book_id,
@@ -688,7 +697,11 @@ def post_tts_next():
                 "voice": task["voice"],
                 "emotion": task.get("emotion") or {},
                 "audio_config": task.get("audio_config"),
+                "tts_engine": task.get("tts_engine", "qwen3"),
             }
+            if task.get("speaker_wav_path"):
+                result["speaker_wav_path"] = task["speaker_wav_path"]
+            return result
     raise HTTPException(status_code=404, detail="No pending tasks")
 
 
@@ -732,7 +745,10 @@ def post_tts_next_batch(count: int = 3):
                 "voice": task["voice"],
                 "emotion": task.get("emotion") or {},
                 "audio_config": task.get("audio_config"),
+                "tts_engine": task.get("tts_engine", "qwen3"),
             }
+            if task.get("speaker_wav_path"):
+                task_data["speaker_wav_path"] = task["speaker_wav_path"]
             tasks.append(task_data)
     if not tasks:
         raise HTTPException(status_code=404, detail="No pending tasks")

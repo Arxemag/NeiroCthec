@@ -17,16 +17,30 @@ from stage4_service.synth import ExternalHTTPSynthesizer, MockSynthesizer
 app = FastAPI(title="Stage4 TTS Worker")
 
 
-def _build_synth():
-    mode = os.getenv("STAGE4_SYNTH_MODE", "mock").strip().lower()
+def _build_synth(mode: str, base_url: str, timeout_sec: int):
     if mode == "external":
-        base_url = os.getenv("EXTERNAL_TTS_URL", "http://tts-engine:8020")
-        timeout = int(os.getenv("EXTERNAL_TTS_TIMEOUT_SEC", "60"))
-        return ExternalHTTPSynthesizer(base_url=base_url, timeout_sec=timeout)
+        return ExternalHTTPSynthesizer(base_url=base_url, timeout_sec=timeout_sec)
     return MockSynthesizer()
 
 
-synth = _build_synth()
+def _get_synthesizers():
+    """Два TTS-сервиса: Qwen3 (8020) и XTTS2 (8021). По задаче выбираем по tts_engine."""
+    mode = os.getenv("STAGE4_SYNTH_MODE", "mock").strip().lower()
+    timeout = int(os.getenv("EXTERNAL_TTS_TIMEOUT_SEC", "60"))
+    url_qwen3 = os.getenv("EXTERNAL_TTS_QWEN3_URL", os.getenv("EXTERNAL_TTS_URL", "http://host.docker.internal:8020")).strip().rstrip("/")
+    url_xtts = os.getenv("EXTERNAL_TTS_XTTS_URL", "http://tts-xtts:8021").strip().rstrip("/")
+    return {
+        "qwen3": _build_synth(mode, url_qwen3, timeout),
+        "xtts2": _build_synth(mode, url_xtts, timeout),
+    }
+
+
+_synthesizers = _get_synthesizers()
+
+
+def _synth_for_engine(tts_engine: str | None):
+    e = (tts_engine or "qwen3").strip().lower()
+    return _synthesizers.get(e) or _synthesizers["qwen3"]
 storage = LocalObjectStorage()
 # Без пробелов и без завершающего слэша, иначе получится /internal%20/tts-next и 404
 core_internal_url = (os.getenv("CORE_INTERNAL_URL", "http://api:8000/internal") or "").strip().rstrip("/")
@@ -39,6 +53,7 @@ def health():
 
 @app.post("/tts", response_model=TTSResponse)
 def tts(request: TTSRequest):
+    synth = _synth_for_engine(getattr(request, "tts_engine", None))
     try:
         relative = Path(request.user_id) / request.book_id / f"line_{request.line_id}.wav"
         tmp_path = Path(tempfile.gettempdir()) / relative
@@ -68,6 +83,8 @@ def process_next_task():
         speaker=task["voice"],
         emotion=task["emotion"],
         audio_config=task.get("audio_config"),
+        speaker_wav_path=task.get("speaker_wav_path"),
+        tts_engine=task.get("tts_engine", "qwen3"),
     )
 
     result = tts(req)
@@ -110,6 +127,8 @@ def _process_one_task() -> bool:
         speaker=task["voice"],
         emotion=task["emotion"],
         audio_config=task.get("audio_config"),
+        speaker_wav_path=task.get("speaker_wav_path"),
+        tts_engine=task.get("tts_engine", "qwen3"),
     )
     result = tts(req)
     if result.status != TTSStatus.DONE:
@@ -157,9 +176,13 @@ def _process_batch_tasks(batch_size: int) -> bool:
             speaker=t["voice"],
             emotion=t.get("emotion"),
             audio_config=t.get("audio_config"),
+            speaker_wav_path=t.get("speaker_wav_path"),
+            tts_engine=t.get("tts_engine", "qwen3"),
         )
         for t in tasks
     ]
+    engine = (tasks[0].get("tts_engine") or "qwen3").strip().lower()
+    synth = _synth_for_engine(engine)
     try:
         batch_results = synth.synthesize_batch(reqs)
     except Exception:

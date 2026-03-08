@@ -51,14 +51,17 @@ class ExternalHTTPSynthesizer:
     def synthesize(self, request: TTSRequest, output_path: Path) -> float:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "text": request.text,
+            "speaker": request.speaker,
+            "emotion": request.emotion or {},
+            "audio_config": request.audio_config or {},
+        }
+        if getattr(request, "speaker_wav_path", None):
+            payload["speaker_wav_path"] = request.speaker_wav_path
         resp = self._requests.post(
             f"{self.base_url}/synthesize",
-            json={
-                "text": request.text,
-                "speaker": request.speaker,
-                "emotion": request.emotion or {},
-                "audio_config": request.audio_config or {},
-            },
+            json=payload,
             timeout=self.timeout,
         )
         resp.raise_for_status()
@@ -74,15 +77,17 @@ class ExternalHTTPSynthesizer:
         """Batch synthesis: one HTTP request, returns [(audio_bytes, duration_ms), ...]."""
         if not requests:
             return []
-        items = [
-            {
+        items = []
+        for r in requests:
+            item = {
                 "text": r.text,
                 "speaker": r.speaker,
                 "emotion": r.emotion or {},
                 "audio_config": r.audio_config or {},
             }
-            for r in requests
-        ]
+            if getattr(r, "speaker_wav_path", None):
+                item["speaker_wav_path"] = r.speaker_wav_path
+            items.append(item)
         resp = self._requests.post(
             f"{self.base_url}/synthesize-batch",
             json={"items": items},

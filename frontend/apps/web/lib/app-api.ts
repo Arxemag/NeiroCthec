@@ -225,26 +225,36 @@ export async function getAudiobookStreamBlob(folder: string): Promise<{ blob: Bl
   return { blob, filename };
 }
 
-/** Сохранить выбор голосов в настройках пользователя (GET + merge + PUT /books/settings/audio). Тогда и process-book-stage4, и tts-next будут использовать эти голоса. */
-export async function putAudioConfigVoiceIds(voiceIds: {
-  narrator?: string;
-  male?: string;
-  female?: string;
-}): Promise<void> {
-  if (!voiceIds.narrator && !voiceIds.male && !voiceIds.female) return;
+export type TtsEngine = 'qwen3' | 'xtts2';
+
+/** Сохранить выбор голосов и/или движка TTS (GET + merge + PUT /books/settings/audio). */
+export async function putAudioConfigVoiceIds(
+  voiceIds: { narrator?: string; male?: string; female?: string },
+  options?: { ttsEngine?: TtsEngine }
+): Promise<void> {
   type AudioConfigRes = { config?: Record<string, unknown> };
   const current = await appJson<AudioConfigRes>('/books/settings/audio').catch(() => ({ config: {} }));
-  const config = { ...(current?.config && typeof current.config === 'object' ? current.config : {}), voice_ids: { ...(voiceIds.narrator && { narrator: voiceIds.narrator }), ...(voiceIds.male && { male: voiceIds.male }), ...(voiceIds.female && { female: voiceIds.female }) } };
+  const config: Record<string, unknown> = { ...(current?.config && typeof current.config === 'object' ? current.config : {}) };
+  if (voiceIds.narrator || voiceIds.male || voiceIds.female) {
+    config.voice_ids = {
+      ...(typeof config.voice_ids === 'object' && config.voice_ids ? config.voice_ids : {}),
+      ...(voiceIds.narrator && { narrator: voiceIds.narrator }),
+      ...(voiceIds.male && { male: voiceIds.male }),
+      ...(voiceIds.female && { female: voiceIds.female }),
+    };
+  }
+  if (options?.ttsEngine !== undefined) config.tts_engine = options.ttsEngine;
   await appJson<unknown>('/books/settings/audio', { method: 'PUT', body: JSON.stringify({ config }) });
 }
 
-/** POST /internal/process-book-stage4 — запустить озвучку (до max_tasks строк). voice_ids из запроса имеют приоритет над дефолтами. */
+/** POST /internal/process-book-stage4 — запустить озвучку (до max_tasks строк). voice_ids и tts_engine из запроса имеют приоритет над дефолтами. */
 export async function processBookStage4(
   bookId: string,
   maxTasks = 500,
-  voiceIds?: { narrator?: string; male?: string; female?: string }
+  voiceIds?: { narrator?: string; male?: string; female?: string },
+  ttsEngine?: TtsEngine
 ): Promise<AppProcessBookStage4Response> {
-  const body: { book_id: string; max_tasks: number; voice_ids?: Record<string, string> } = {
+  const body: { book_id: string; max_tasks: number; voice_ids?: Record<string, string>; tts_engine?: TtsEngine } = {
     book_id: bookId,
     max_tasks: maxTasks,
   };
@@ -254,6 +264,7 @@ export async function processBookStage4(
     if (voiceIds.male) body.voice_ids.male = voiceIds.male;
     if (voiceIds.female) body.voice_ids.female = voiceIds.female;
   }
+  if (ttsEngine) body.tts_engine = ttsEngine;
   return appJson<AppProcessBookStage4Response>('/internal/process-book-stage4', {
     method: 'POST',
     body: JSON.stringify(body),

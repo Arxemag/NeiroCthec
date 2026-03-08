@@ -30,6 +30,7 @@ venv/
 env/
 ENV/
 app/.venv/
+app/.venv_xtts/
 
 # Unit test / coverage reports
 .pytest_cache/
@@ -73,6 +74,8 @@ app/**/__pycache__/
 ########################
 # Frontend
 ########################
+**/node_modules/
+**/.next/
 frontend/node_modules/
 frontend/.next/
 frontend/dist/

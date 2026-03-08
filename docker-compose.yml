@@ -1,7 +1,6 @@
 # НейроЧтец — единый запуск всего стека из корня проекта.
 # Запуск: docker compose up -d
-# TTS (NVIDIA): docker compose up -d tts  (опционально, для машин с NVIDIA)
-# Локальный TTS на AMD: запускайте python -m tts_engine_service.app в папке app, порт 8020.
+# XTTS2 — в пуле по умолчанию (tts-xtts:8021). Qwen3 — локально на 8020 или в Docker с профилем nvidia-tts.
 
 services:
   # --- Инфраструктура (Postgres, Redis, MinIO) ---
@@ -53,10 +52,12 @@ services:
       dockerfile: Dockerfile.core
     depends_on:
       - core
+      - tts-xtts
     environment:
       - CORE_INTERNAL_URL=http://core:8000/internal
       - STAGE4_SYNTH_MODE=external
-      - EXTERNAL_TTS_URL=http://host.docker.internal:8020
+      - EXTERNAL_TTS_QWEN3_URL=http://host.docker.internal:8020
+      - EXTERNAL_TTS_XTTS_URL=http://tts-xtts:8021
       - APP_STORAGE_ROOT=/app/storage
     volumes:
       - ./app:/app
@@ -67,7 +68,7 @@ services:
       # Для большего числа воркеров: docker compose up -d --scale stage4=4
 
   # --- TTS Qwen3 (NVIDIA). Не поднимать на AMD — там TTS локально на 8020. ---
-  tts:
+  tts-qwen3:
     build:
       context: ./app
       dockerfile: Dockerfile
@@ -90,6 +91,29 @@ services:
               capabilities: [gpu]
     profiles:
       - nvidia-tts
+
+  # --- TTS XTTS2 (NVIDIA GPU). Порт 8021. Входит в стандартный пул. ---
+  tts-xtts:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.xtts
+    runtime: nvidia
+    ports:
+      - "8021:8021"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TTS_ENGINE_PORT=8021
+    volumes:
+      - ./app/storage:/app/storage
+      - tts_xtts_cache:/root/.cache/tts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # --- Frontend: один раз ставим зависимости (frontend_deps), затем api/worker/web только запускают скрипты ---
   frontend_deps:
@@ -161,5 +185,6 @@ volumes:
   pgdata:
   miniodata:
   tts_cache:
+  tts_xtts_cache:
   frontend_node_modules:
   frontend_web_next:
