@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsOptional, IsString, MaxLength } from '../../lib/validators';
 
 export class UpdateVoiceDto {
   @IsOptional()

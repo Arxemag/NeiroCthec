@@ -9,9 +9,15 @@ async function bootstrap() {
   // 1. Создаём без cors:true
   const app = await NestFactory.create(AppModule);
 
-  // 2. Включаем CORS вручную, с поддержкой cookies (localhost и 127.0.0.1 — разные origin)
+  // 2. CORS: в Docker браузер может открывать приложение по IP (например http://192.168.1.5:3000).
+  // CORS_ORIGINS — список через запятую; если не задан — localhost. Регулярка для любого хоста: * (не для credentials).
+  const corsOriginsEnv = process.env.CORS_ORIGINS?.trim();
+  const corsOrigin = corsOriginsEnv
+    ? corsOriginsEnv.split(',').map((o) => o.trim()).filter(Boolean)
+    : ['http://localhost:3000', 'http://127.0.0.1:3000'];
+  const corsOriginRegex = process.env.CORS_ORIGIN_REGEX?.trim();
   app.enableCors({
-    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    origin: corsOriginRegex ? new RegExp(corsOriginRegex) : corsOrigin,
     credentials: true,
   });
 
@@ -40,7 +46,9 @@ async function bootstrap() {
   );
 
   const port = Number(process.env.PORT ?? 4000);
-  await app.listen(port);
+  // В Docker запросы идут с других контейнеров (web → api:4000). Слушать нужно 0.0.0.0, иначе ECONNREFUSED.
+  const host = process.env.HOST ?? '0.0.0.0';
+  await app.listen(port, host);
 }
 
 bootstrap().catch((e) => {

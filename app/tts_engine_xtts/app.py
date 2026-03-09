@@ -28,6 +28,47 @@ from core.voices import get_voice_path  # noqa: E402
 # Принять лицензию Coqui неинтерактивно (до импорта TTS)
 os.environ.setdefault("COQUI_TOS_AGREED", "1")
 
+
+def _gpu_runtime_status() -> tuple[bool, str | None]:
+    """Проверка CUDA (NVIDIA). Для быстрого инференса модель нужно явно переносить на GPU через tts.to('cuda')."""
+    try:
+        import torch  # noqa: I001
+        if torch.cuda.is_available():
+            try:
+                name = torch.cuda.get_device_name(0)
+            except Exception:
+                name = "cuda:0"
+            return True, name
+        return False, None
+    except Exception:
+        return False, None
+
+
+def _device_preference() -> str:
+    """TTS_USE_GPU + наличие CUDA -> cuda, иначе cpu."""
+    use_gpu = os.getenv("TTS_USE_GPU", "true").strip().lower() in ("1", "true", "yes")
+    cuda_ok, _ = _gpu_runtime_status()
+    return "cuda" if (use_gpu and cuda_ok) else "cpu"
+
+
+def _patch_torch_load_for_coqui() -> None:
+    """PyTorch 2.6+: чекпоинты Coqui требуют weights_only=False."""
+    try:
+        import torch
+    except Exception:
+        return
+    original_load = getattr(torch, "load", None)
+    if original_load is None or getattr(original_load, "__coqui_patched__", False):
+        return
+
+    def _patched_load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original_load(*args, **kwargs)
+
+    _patched_load.__coqui_patched__ = True  # type: ignore[attr-defined]
+    torch.load = _patched_load  # type: ignore[assignment]
+
+
 logging.basicConfig(
     level=os.getenv("TTS_XTTS_LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -58,13 +99,33 @@ def _load_xtts() -> bool:
         return False
     _XTTS_LOADING = True
     try:
+        _patch_torch_load_for_coqui()
         from tts_engine_xtts.xtts_patch import apply_xtts_position_embeddings_patch
         apply_xtts_position_embeddings_patch()
         from TTS.api import TTS
-        use_gpu = os.getenv("TTS_USE_GPU", "true").strip().lower() in ("1", "true", "yes")
-        _XTTS_MODEL = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu, progress_bar=False)
+
+        model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
+        target_device = _device_preference()
+        use_gpu = target_device == "cuda"
+        cuda_ok, gpu_name = _gpu_runtime_status()
+
+        # Создаём модель без устаревшего gpu=; затем явно переносим на device (как в Ready_vers — быстрый инференс на GPU).
+        try:
+            tts = TTS(model_name=model_name, progress_bar=False)
+        except TypeError:
+            tts = TTS(model_name=model_name, progress_bar=False, gpu=use_gpu)
+        if hasattr(tts, "to"):
+            try:
+                tts.to(target_device)
+            except Exception as e:
+                logger.warning("tts.to(%s) failed: %s; using default device", target_device, e)
+
+        _XTTS_MODEL = tts
         _XTTS_ERROR = None
-        logger.info("XTTS v2 loaded, gpu=%s", use_gpu)
+        logger.info(
+            "XTTS v2 loaded, device=%s use_gpu=%s cuda_available=%s gpu_name=%s",
+            target_device, use_gpu, cuda_ok, gpu_name or "n/a",
+        )
         return True
     except Exception as e:
         _XTTS_ERROR = str(e)
@@ -195,7 +256,7 @@ def _xtts_inference_params(audio_config: dict | None) -> dict[str, Any]:
     return {
         "temperature": float(cfg.get("temperature", os.getenv("TTS_XTTS_TEMPERATURE", "0.35"))),
         "speed": float(cfg.get("speed", os.getenv("TTS_XTTS_SPEED", "1.0"))),
-        "split_sentences": False,  # вариант A: разбиваем сами по чанкам, в TTS не разбивать
+        "split_sentences": False,
     }
 
 
@@ -236,7 +297,9 @@ def synthesize(request: SynthesizeRequest) -> Response:
     t_load = time.perf_counter() - t0
     if t_load > 0.5:
         logger.info("xtts model ready (load/init took %.1fs)", t_load)
+    logger.info("resolving speaker wav for speaker=%s", request.speaker)
     speaker_wav = _resolve_speaker_wav(request)
+    logger.info("speaker wav resolved: %s", speaker_wav or "(none)")
     if not speaker_wav:
         raise HTTPException(
             status_code=400,
@@ -245,54 +308,36 @@ def synthesize(request: SynthesizeRequest) -> Response:
     lang = "ru"
     if request.audio_config and isinstance(request.audio_config.get("language"), str):
         lang = request.audio_config["language"]
-    text_clean = _normalize_text_for_xtts(request.text)
-    if not text_clean.strip():
-        raise HTTPException(status_code=400, detail="Text is empty after normalization")
+    use_normalize = os.getenv("TTS_XTTS_NORMALIZE_TEXT", "").strip().lower() in ("1", "true", "yes")
+    text_clean = _normalize_text_for_xtts(request.text) if use_normalize else (request.text or "").strip()
+    if not text_clean:
+        raise HTTPException(status_code=400, detail="Text is empty")
     params = _xtts_inference_params(request.audio_config)
-    cfg = request.audio_config or {}
-    # Режим без чанков (один вызов tts_to_file): TTS_XTTS_SINGLE_CHUNK=1 — для проверки, не ломает ли чанкинг
-    use_chunks = os.getenv("TTS_XTTS_SINGLE_CHUNK", "").strip().lower() not in ("1", "true", "yes")
-    max_chunk = int(cfg.get("chunk_max") or os.getenv("TTS_XTTS_CHUNK_MAX", "140"))
-    chunks = _chunk_text(text_clean, max_len=max_chunk) if use_chunks else [text_clean]
     out_path = Path(tempfile.gettempdir()) / "tts_xtts_out.wav"
-    temp_dir = Path(tempfile.gettempdir())
-    chunk_paths: list[Path] = []
     try:
-        base_kw: dict[str, Any] = {
+        kwargs: dict[str, Any] = {
+            "text": text_clean,
+            "file_path": str(out_path),
             "speaker_wav": speaker_wav,
             "language": lang,
             "split_sentences": False,
             "temperature": params["temperature"],
             "speed": params["speed"],
         }
-        for i, chunk in enumerate(chunks):
-            if not chunk.strip():
-                continue
-            chunk_path = temp_dir / f"tts_xtts_chunk_{i}.wav"
-            chunk_paths.append(chunk_path)
-            t_chunk = time.perf_counter()
-            kwargs = {**base_kw, "text": chunk, "file_path": str(chunk_path)}
-            try:
-                _XTTS_MODEL.tts_to_file(**kwargs)
-            except TypeError:
-                kwargs.pop("temperature", None)
-                kwargs.pop("speed", None)
-                _XTTS_MODEL.tts_to_file(**kwargs)
-            except Exception as e:
-                logger.exception("tts_to_file failed for chunk %s/%s: %s", i + 1, len(chunks), e)
-                raise HTTPException(status_code=500, detail=f"TTS chunk failed: {e!s}") from e
-            logger.info("chunk %s/%s done in %.1fs", i + 1, len(chunks), time.perf_counter() - t_chunk)
-        if not chunk_paths:
-            raise HTTPException(status_code=400, detail="No audio generated")
-        if len(chunk_paths) == 1:
-            content = chunk_paths[0].read_bytes()
-            with wave.open(BytesIO(content), "rb") as wf:
-                duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
-        else:
-            _concat_wavs(chunk_paths, out_path)
-            content = out_path.read_bytes()
-            with wave.open(BytesIO(content), "rb") as wf:
-                duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+        try:
+            _XTTS_MODEL.tts_to_file(**kwargs)
+        except TypeError:
+            kwargs.pop("temperature", None)
+            kwargs.pop("speed", None)
+            _XTTS_MODEL.tts_to_file(**kwargs)
+        except Exception as e:
+            logger.exception("tts_to_file failed: %s", e)
+            raise HTTPException(status_code=500, detail=f"TTS failed: {e!s}") from e
+        if not out_path.exists():
+            raise HTTPException(status_code=500, detail="No audio generated")
+        content = out_path.read_bytes()
+        with wave.open(BytesIO(content), "rb") as wf:
+            duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
         total_s = time.perf_counter() - t0
         logger.info("synthesize done in %.1fs (audio %sms)", total_s, duration_ms)
         return Response(
@@ -301,12 +346,6 @@ def synthesize(request: SynthesizeRequest) -> Response:
             headers={"x-duration-ms": str(duration_ms)},
         )
     finally:
-        for p in chunk_paths:
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
         if out_path.exists():
             try:
                 out_path.unlink()

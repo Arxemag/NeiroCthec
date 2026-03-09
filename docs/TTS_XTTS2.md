@@ -2,6 +2,8 @@
 
 Сервис озвучки на **Coqui XTTS v2** работает **только в Docker** — контейнер `tts-xtts`, порт **8021**. Контракт совместим с Qwen3: `POST /synthesize` (text, speaker, speaker_wav_path, audio_config) → WAV.
 
+Логика: **пришло — озвучил — выдал**: один запрос с текстом → один вызов модели → один WAV в ответе. Текст по умолчанию передаётся в модель как есть (без нормализации); при необходимости нормализацию можно включить через `TTS_XTTS_NORMALIZE_TEXT=1`.
+
 ## Запуск
 
 XTTS2 входит в стандартный пул контейнеров. При запуске из корня проекта:
@@ -22,7 +24,7 @@ docker compose up -d
 
 - **GET /health** — статус (xtts_ready, xtts_error, xtts_loading).
 - **GET /voices** — список голосов (id, path) из общего реестра `core.voices`.
-- **POST /synthesize** — JSON: `text`, `speaker`, опционально `speaker_wav_path`, `audio_config` (в т.ч. `language`, `temperature`, `speed`, `split_sentences`). Ответ: сырые байты WAV. Если передан `speaker_wav_path`, он используется как образец голоса; иначе путь берётся по `speaker` из `storage/voices`. Перед синтезом текст нормализуется (тире, точка в конце), чтобы снизить артифакты и «озвучивание» пунктуации.
+- **POST /synthesize** — JSON: `text`, `speaker`, опционально `speaker_wav_path`, `audio_config` (в т.ч. `language`, `temperature`, `speed`). Ответ: сырые байты WAV. Один запрос — один вызов модели — один WAV. Если передан `speaker_wav_path`, он используется как образец голоса; иначе путь берётся по `speaker` из `storage/voices`. Текст по умолчанию передаётся в модель как есть (только `strip()`); при `TTS_XTTS_NORMALIZE_TEXT=1` включается нормализация (тире, кавычки, точки в конце).
 
 Голоса — те же WAV в `storage/voices` (narrator, male, female и кастомные), что и для Qwen3.
 
@@ -33,10 +35,9 @@ docker compose up -d
 - `TTS_USE_GPU` — `true`/`false`. Если в `/health` видите `xtts_error: "CUDA is not availabe on this machine."`, задайте `TTS_USE_GPU=false` в окружении контейнера — модель поднимется на CPU (медленнее, но синтез будет работать). В `docker-compose.yml` по умолчанию выставлено `false` для совместимости с машинами без NVIDIA.
 - `TTS_XTTS_TEMPERATURE` — температура инференса (по умолчанию 0.35; ниже — меньше артифактов).
 - `TTS_XTTS_SPEED` — скорость речи (по умолчанию 1.0).
-- `TTS_XTTS_SPLIT_SENTENCES` — разбивать текст по предложениям (по умолчанию true).
 - `TTS_XTTS_LOG_LEVEL` — уровень логирования.
-- `TTS_XTTS_SINGLE_CHUNK` — если `1`/`true`/`yes`, текст не разбивается на чанки, один вызов `tts_to_file` (как до введения чанкинга). Используйте для проверки, не связана ли ошибка с чанкингом/склейкой.
+- `TTS_XTTS_NORMALIZE_TEXT` — при `1`/`true`/`yes` текст перед синтезом нормализуется (кавычки, тире, точки). По умолчанию выключено: текст передаётся в модель как пришёл (только `strip()`).
 
 Stage4 при выборе пользователем движка XTTS2 обращается по `EXTERNAL_TTS_XTTS_URL` (в compose по умолчанию `http://tts-xtts:8021`).
 
-**XTTS на CPU:** один запрос может занимать **1–3 минуты** на одну строку. Причины: (1) первый запрос после старта может включать дозагрузку модели в память (десятки секунд); (2) сам инференс на CPU медленный — каждый чанк текста 30–90+ секунд. В логах tts-xtts после запроса появятся строки `synthesize request: ...`, `chunk 1/N done in X.Xs`, `synthesize done in X.Xs` — по ним видно, сколько ушло на загрузку модели и на синтез по чанкам. В `docker-compose.yml` для stage4 задано `EXTERNAL_TTS_TIMEOUT_SEC=300` и `replicas: 1`. Для ускорения нужен GPU (NVIDIA + Container Toolkit, `TTS_USE_GPU=true`).
+**XTTS на CPU:** один запрос может занимать **1–3 минуты** на одну строку. Причины: (1) первый запрос после старта может включать дозагрузку модели в память (десятки секунд); (2) сам инференс на CPU медленный. В логах tts-xtts: `synthesize request: ...`, `synthesize done in X.Xs (audio Yms)`. В `docker-compose.yml` для stage4 заданы таймауты и `replicas: 1`. Для ускорения нужен GPU (NVIDIA + Container Toolkit, `TTS_USE_GPU=true`).

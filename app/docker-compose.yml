@@ -28,6 +28,7 @@ services:
       - STAGE4_SYNTH_MODE=external
       # По умолчанию — локальный TTS Qwen3 на хосте (AMD)
       - EXTERNAL_TTS_URL=http://host.docker.internal:8020
+      - STAGE4_BATCH_SIZE=5
     volumes:
       - ./:/app
       - ./storage:/app/storage

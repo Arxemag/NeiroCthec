@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState, useRef } from 'react';
 import { Pencil, Image as ImageIcon, Save, X, Trash2, Check, Download, Play } from 'lucide-react';
-import { apiJson } from '../../../lib/api';
+import { apiJson, API_BASE } from '../../../lib/api';
 import {
   isAppApiEnabled,
   listBooks,
@@ -393,13 +393,13 @@ export default function BooksPage() {
   }, [books.filter((b) => b.fromApp).map((b) => `${b.id}:${b.status ?? ''}`).join(',')]);
 
   function getAudioUrl(streamUrl: string): string {
-    const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+    const base = API_BASE;
     return streamUrl.startsWith('http') ? streamUrl : `${base}${streamUrl}`;
   }
 
   function getCoverUrl(book: Book): string | null {
     if (book.coverImageUrl) {
-      const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+      const base = API_BASE;
       return book.coverImageUrl.startsWith('http') ? book.coverImageUrl : `${base}${book.coverImageUrl}`;
     }
     return null;
@@ -517,7 +517,7 @@ export default function BooksPage() {
       const formData = new FormData();
       formData.append('file', file);
 
-      const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+      const base = API_BASE;
       const token = localStorage.getItem('neurochtec_access_token');
       
       const response = await fetch(`${base}/api/books/${bookId}/cover`, {
@@ -613,7 +613,7 @@ export default function BooksPage() {
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => handleDownloadAppBook(book.id, book.title)}
+                              onClick={() => handleDownloadAppBook(book)}
                               disabled={downloadingId === book.id}
                             >
                               <Download className="h-3.5 w-3.5 mr-1" />

@@ -42,11 +42,15 @@ class Line:
 
     # Глава (по заголовкам в парсере)
     chapter_id: Optional[int] = None  # 1 = первая глава / без явного заголовка
+    is_chapter_header: bool = False  # True если строка — заголовок главы (CHAPTER_HEADER_RE)
 
     # Результаты обработки
     speaker: Optional[str] = None  # "male", "female", "narrator"
     emotion: Optional[EmotionProfile] = None
     audio_path: Optional[str] = None
+
+    # Текст для TTS после нормализации (кавычки, троеточия и т.д.); заполняется после Stage 3
+    text_for_tts: Optional[str] = None
 
     # Внутренние флаги (не slots, используем property)
     @property

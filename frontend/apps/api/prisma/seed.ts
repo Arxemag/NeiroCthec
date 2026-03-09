@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { PrismaClient, SubscriptionStatus, UserRole, VoiceGender } from '@prisma/client';
+import { PrismaClient, SubscriptionStatus, UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
 
 const prisma = new PrismaClient();
@@ -28,41 +28,9 @@ async function main() {
     update: {},
   });
 
-  // Voices
-  const voices = [
-    {
-      name: 'Анна',
-      gender: VoiceGender.female,
-      language: 'ru-RU',
-      style: 'neutral',
-      provider: 'stub',
-      providerVoiceId: 'ru-anna-neutral',
-    },
-    {
-      name: 'Максим',
-      gender: VoiceGender.male,
-      language: 'ru-RU',
-      style: 'narration',
-      provider: 'stub',
-      providerVoiceId: 'ru-maxim-narration',
-    },
-    {
-      name: 'Alex',
-      gender: VoiceGender.neutral,
-      language: 'en-US',
-      style: 'ad',
-      provider: 'stub',
-      providerVoiceId: 'en-alex-ad',
-    },
-  ];
-
-  for (const v of voices) {
-    await prisma.voice.upsert({
-      where: { provider_providerVoiceId: { provider: v.provider, providerVoiceId: v.providerVoiceId } },
-      create: v,
-      update: { ...v },
-    });
-  }
+  // Голоса не сидим здесь. Источник правды — Core API (GET /voices): встроенные narrator/male/female
+  // и свои из storage/voices/{user_id}. Удаляем старые заглушки (provider: 'stub'), если остались.
+  await prisma.voice.deleteMany({ where: { provider: 'stub' } });
 
   // Admin user (optional)
   const adminEmail = 'admin@neurochtec.local';

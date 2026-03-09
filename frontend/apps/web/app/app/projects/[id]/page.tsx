@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, FileUp, Pause, Pencil, Play, Trash2, X } from 'lucide-react';
-import { apiJson } from '../../../../lib/api';
+import { apiJson, API_BASE } from '../../../../lib/api';
 import { getAccessToken, getStoredUserId } from '../../../../lib/auth';
-import { isAppApiEnabled, getAppApiUrl, getBookChapterAudioUrl, listVoices, listBooksByProject, appFetch, appJson, putAudioConfigVoiceIds, processBookStage4, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject, type AppBook, type TtsEngine } from '../../../../lib/app-api';
+import { isAppApiEnabled, getAppApiUrl, getAppApiVoiceSampleUrl, getBookChapterAudioUrl, listVoices, listBooksByProject, appFetch, appJson, putAudioConfigVoiceIds, processBookStage4, getPreviewBySpeakers, getBookStatus, downloadBookAudio, deleteBook, deleteBooksByProject, uploadVoice, deleteVoice, type AppBook, type TtsEngine, type SpeakerSettings } from '../../../../lib/app-api';
 import { Button } from '../../../../components/ui';
 import { useParams, useRouter } from 'next/navigation';
 import { cacheProjectFile, getCachedFile, createFileFromCache, hasCachedFile } from '../../../../lib/file-cache';
@@ -27,9 +27,18 @@ type Project = {
   language: string;
   status: string;
   voices?: { voiceId: string; voice: Voice }[];
+  voiceSettings?: { narratorVoiceId?: string | null; maleVoiceId?: string | null; femaleVoiceId?: string | null } | null;
 };
 type AudioItem = { id: string; status: string; format?: string | null; durationSeconds?: number | null; createdAt: string };
-type Chapter = { id: string; title: string; audioId?: string; durationSeconds?: number; createdAt: string };
+/** Формат ответа бэка GET /api/projects/:id/chapters (План 1). Поддержка snake_case из API. */
+type Chapter = {
+  id: string;
+  title: string;
+  order?: number;
+  audioId?: string;
+  durationSeconds?: number;
+  createdAt: string;
+};
 
 export default function ProjectPage() {
   const params = useParams<{ id: string }>();
@@ -66,6 +75,7 @@ export default function ProjectPage() {
   const [fullProcessingStatus, setFullProcessingStatus] = useState<'idle' | 'processing' | 'queued' | 'ready' | 'error'>('idle');
   const [fullProcessingProgress, setFullProcessingProgress] = useState<number>(0);
   const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [chaptersError, setChaptersError] = useState<string | null>(null);
   const [showCreateBookConfirm, setShowCreateBookConfirm] = useState(false);
   const [creatingBook, setCreatingBook] = useState(false);
   const [hasListenedToFinalAudio, setHasListenedToFinalAudio] = useState(false);
@@ -85,45 +95,50 @@ export default function ProjectPage() {
   const [projectBooks, setProjectBooks] = useState<AppBook[]>([]);
   /** Номера готовых глав (из GET /books/:id/status chapters_ready) — для раннего воспроизведения по главам. */
   const [chaptersReadyFromApp, setChaptersReadyFromApp] = useState<number[]>([]);
+  /** Превью по спикерам: URL аудио для narrator, male, female (после «Озвучить фрагмент»). */
+  const [previewFragmentUrls, setPreviewFragmentUrls] = useState<{ narrator?: string; male?: string; female?: string } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  /** Настройки скорости и тембра по спикерам. Вариант A: одна пара для всех (дефолт). */
+  const [speakerSettings, setSpeakerSettings] = useState<SpeakerSettings>({
+    narrator: { tempo: 1.0, pitch: 0 },
+    male: { tempo: 1.0, pitch: 0 },
+    female: { tempo: 1.0, pitch: 0 },
+  });
+  /** Принудительно переозвучить все строки (игнорировать готовые wav) — иначе в stage4 не уйдёт, если всё уже «готово». */
+  const [forceReSynthesize, setForceReSynthesize] = useState(false);
+  /** Свои голоса: форма загрузки и удаление */
+  const [showAddVoiceForm, setShowAddVoiceForm] = useState(false);
+  const [voiceUploadFile, setVoiceUploadFile] = useState<File | null>(null);
+  const [voiceUploadName, setVoiceUploadName] = useState('');
+  const [voiceUploadRole, setVoiceUploadRole] = useState<'narrator' | 'male' | 'female' | ''>('');
+  const [voiceUploading, setVoiceUploading] = useState(false);
+  const [voiceUploadError, setVoiceUploadError] = useState<string | null>(null);
+  const [deletingVoiceId, setDeletingVoiceId] = useState<string | null>(null);
+  const voiceFileInputRef = useRef<HTMLInputElement>(null);
+
+  /** Нормализует главу из ответа бэка (snake_case → camelCase). */
+  function normalizeChapter(raw: Record<string, unknown>): Chapter {
+    return {
+      id: String(raw.id ?? ''),
+      title: String(raw.title ?? ''),
+      order: typeof raw.order === 'number' ? raw.order : undefined,
+      audioId: typeof raw.audio_id === 'string' ? raw.audio_id : typeof raw.audioId === 'string' ? raw.audioId : undefined,
+      durationSeconds: typeof raw.duration_seconds === 'number' ? raw.duration_seconds : typeof raw.durationSeconds === 'number' ? raw.durationSeconds : undefined,
+      createdAt: typeof raw.created_at === 'string' ? raw.created_at : typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
+    };
+  }
 
   async function loadChapters() {
+    setChaptersError(null);
     try {
-      // Пытаемся загрузить главы через API
-      const data = await apiJson<{ chapters: Chapter[] }>(`/api/projects/${projectId}/chapters`);
-      setChapters(data.chapters);
+      const data = await apiJson<{ chapters: unknown[] }>(`/api/projects/${projectId}/chapters`);
+      const list = Array.isArray(data.chapters) ? data.chapters : [];
+      setChapters(list.map((c) => normalizeChapter(typeof c === 'object' && c !== null ? (c as Record<string, unknown>) : {})));
     } catch (e: any) {
-      // Если endpoint не существует, используем заглушку для тестирования
-      console.warn('Endpoint для глав не найден, используем заглушку:', e);
-      
-      // Заглушка для тестирования проекта cmltq0vo80001p1p0180h5qhu
-      if (projectId === 'cmltq0vo80001p1p0180h5qhu') {
-        setChapters([
-          {
-            id: 'chapter-1',
-            title: 'Глава 1: Начало пути',
-            audioId: 'mock-audio-1',
-            durationSeconds: 120,
-            createdAt: new Date().toISOString(),
-          },
-          {
-            id: 'chapter-2',
-            title: 'Глава 2: Развитие событий',
-            audioId: 'mock-audio-2',
-            durationSeconds: 95,
-            createdAt: new Date(Date.now() - 60000).toISOString(),
-          },
-          {
-            id: 'chapter-3',
-            title: 'Глава 3: Кульминация',
-            audioId: 'mock-audio-3',
-            durationSeconds: 150,
-            createdAt: new Date(Date.now() - 120000).toISOString(),
-          },
-        ]);
-      } else {
-        // Для других проектов просто не показываем главы
-        setChapters([]);
-      }
+      console.warn('Не удалось загрузить главы:', e);
+      setChapters([]);
+      setChaptersError('Главы недоступны');
     }
   }
 
@@ -210,15 +225,33 @@ export default function ProjectPage() {
         if (appUrl) {
           try {
             const appVoices = await listVoices();
-            if (appVoices.length > 0) return mapAppVoicesToVoice(appVoices);
+            if (appVoices.length > 0) {
+              // #region agent log
+              try {
+                fetch('http://127.0.0.1:7653/ingest/197dff00-57dd-45ca-809c-c08d9512ccf4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '9376b5' }, body: JSON.stringify({ sessionId: '9376b5', hypothesisId: 'voices-fe', location: 'projects/[id]/page:loadVoices', message: 'Voices from Core', data: { source: 'app', count: appVoices.length }, timestamp: Date.now() }) }).catch(() => {});
+              } catch (_) {}
+              // #endregion
+              return mapAppVoicesToVoice(appVoices);
+            }
           } catch (e) {
             console.warn('[Voices] FastAPI /voices failed, falling back to Nest:', e);
           }
         }
         try {
           const r = await apiJson<{ voices?: Voice[] }>('/api/voices');
-          return (r.voices ?? []) as Voice[];
-        } catch {
+          const list = (r.voices ?? []) as Voice[];
+          // #region agent log
+          try {
+            fetch('http://127.0.0.1:7653/ingest/197dff00-57dd-45ca-809c-c08d9512ccf4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '9376b5' }, body: JSON.stringify({ sessionId: '9376b5', hypothesisId: 'voices-fe', location: 'projects/[id]/page:loadVoices', message: 'Voices from Nest', data: { source: 'nest', count: list.length }, timestamp: Date.now() }) }).catch(() => {});
+          } catch (_) {}
+          // #endregion
+          return list;
+        } catch (e) {
+          // #region agent log
+          try {
+            fetch('http://127.0.0.1:7653/ingest/197dff00-57dd-45ca-809c-c08d9512ccf4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '9376b5' }, body: JSON.stringify({ sessionId: '9376b5', hypothesisId: 'voices-fe', location: 'projects/[id]/page:loadVoices', message: 'Voices failed', data: { error: String(e) }, timestamp: Date.now() }) }).catch(() => {});
+          } catch (_) {}
+          // #endregion
           return [];
         }
       })();
@@ -276,10 +309,11 @@ export default function ProjectPage() {
       if (isAppApiEnabled() && projectId) {
         try {
           const books = await listBooksByProject(projectId);
-          setProjectBooks(books);
-          if (books.length > 0) setLastUploadedBookId(books[books.length - 1].id);
+          const list = Array.isArray(books) ? books : [];
+          setProjectBooks(list);
+          if (list.length > 0) setLastUploadedBookId(list[list.length - 1].id);
           // Загружаем финальный WAV, если есть готовое аудио
-          const bookWithAudio = books.find((b) => b.final_audio_path);
+          const bookWithAudio = list.find((b) => b.final_audio_path);
           if (bookWithAudio) {
             try {
               const { blob } = await downloadBookAudio(bookWithAudio.id);
@@ -296,8 +330,9 @@ export default function ProjectPage() {
         }
         // Загружаем настройки аудио (в т.ч. tts_engine)
         try {
-          const audioSettings = await appJson<{ config?: { tts_engine?: string } }>('/books/settings/audio').catch(() => ({ config: {} }));
-          const engine = audioSettings?.config?.tts_engine;
+          const audioSettings = await appJson<{ config?: { tts_engine?: string } }>('/books/settings/audio').catch(() => ({}));
+          const config = audioSettings && typeof audioSettings === 'object' && 'config' in audioSettings ? audioSettings.config : undefined;
+          const engine = config?.tts_engine;
           if (engine === 'xtts2' || engine === 'qwen3') setTtsEngine(engine);
         } catch {
           /* ignore */
@@ -357,6 +392,7 @@ export default function ProjectPage() {
         ...selectedVoiceIds,
       };
       const projectVoices = p.project.voices ?? [];
+      const vs = p.project.voiceSettings;
 
       if (projectVoices.length > 0) {
         for (const pv of projectVoices) {
@@ -367,13 +403,16 @@ export default function ProjectPage() {
             else if (voice.gender === 'female' && !initialVoices.female) initialVoices.female = voice.id;
           }
         }
+      } else if (vs && (vs.narratorVoiceId || vs.maleVoiceId || vs.femaleVoiceId)) {
+        if (vs.narratorVoiceId && !initialVoices.narrator) initialVoices.narrator = vs.narratorVoiceId;
+        if (vs.maleVoiceId && !initialVoices.male) initialVoices.male = vs.maleVoiceId;
+        if (vs.femaleVoiceId && !initialVoices.female) initialVoices.female = vs.femaleVoiceId;
       } else {
         if (isAppApiEnabled()) {
-          const byId = (id: string) => voicesList.find((v) => v.id === id)?.id ?? voicesList[0]?.id;
           if (voicesList.length > 0) {
-            if (!initialVoices.narrator) initialVoices.narrator = byId('narrator');
-            if (!initialVoices.male) initialVoices.male = byId('male');
-            if (!initialVoices.female) initialVoices.female = byId('female');
+            if (!initialVoices.narrator) initialVoices.narrator = voicesList[0].id;
+            if (!initialVoices.male) initialVoices.male = voicesList.find((v) => v.gender === 'male')?.id ?? voicesList[0]?.id;
+            if (!initialVoices.female) initialVoices.female = voicesList.find((v) => v.gender === 'female')?.id ?? voicesList[0]?.id;
           }
         } else {
           const narrator = voicesList.find((vo) => vo.role === 'narrator');
@@ -395,6 +434,82 @@ export default function ProjectPage() {
       setError(e?.message ?? 'Ошибка загрузки');
     } finally {
       setLoading(false);
+    }
+  }
+
+  /** Обновить только список голосов (после загрузки/удаления своего голоса). */
+  async function refetchVoices() {
+    const mapAppVoicesToVoice = (appVoices: { id: string; name: string; role: string }[]) =>
+      appVoices.map((av) => ({
+        id: av.id,
+        name: av.name,
+        role: (av.role === 'narrator' ? 'narrator' : 'actor') as 'narrator' | 'actor',
+        language: 'ru',
+        gender: av.role === 'male' ? 'male' : av.role === 'female' ? 'female' : 'neutral',
+        style: '',
+        hasSample: true,
+      }));
+    const appUrl = getAppApiUrl();
+    if (appUrl) {
+      try {
+        const appVoices = await listVoices();
+        if (appVoices.length > 0) {
+          setVoices(mapAppVoicesToVoice(appVoices));
+          return;
+        }
+      } catch (e) {
+        console.warn('[Voices] refetchVoices: FastAPI /voices failed, falling back to Nest:', e);
+      }
+    }
+    try {
+      const r = await apiJson<{ voices?: Voice[] }>('/api/voices');
+      setVoices((r.voices ?? []) as Voice[]);
+    } catch {
+      setVoices([]);
+    }
+  }
+
+  async function handleUploadVoice() {
+    if (!voiceUploadFile) {
+      setVoiceUploadError('Выберите WAV-файл');
+      return;
+    }
+    setVoiceUploadError(null);
+    setVoiceUploading(true);
+    try {
+      await uploadVoice(voiceUploadFile, {
+        name: voiceUploadName.trim() || undefined,
+        role: voiceUploadRole || undefined,
+      });
+      setVoiceUploadFile(null);
+      setVoiceUploadName('');
+      setVoiceUploadRole('');
+      setShowAddVoiceForm(false);
+      if (voiceFileInputRef.current) voiceFileInputRef.current.value = '';
+      await refetchVoices();
+    } catch (e: any) {
+      setVoiceUploadError(e?.message ?? 'Не удалось загрузить голос');
+    } finally {
+      setVoiceUploading(false);
+    }
+  }
+
+  async function handleDeleteVoice(voiceId: string) {
+    setDeletingVoiceId(voiceId);
+    try {
+      await deleteVoice(voiceId);
+      setSelectedVoiceIds((prev) => {
+        const next = { ...prev };
+        if (prev.narrator === voiceId) next.narrator = undefined;
+        if (prev.male === voiceId) next.male = undefined;
+        if (prev.female === voiceId) next.female = undefined;
+        return next;
+      });
+      await refetchVoices();
+    } catch (e: any) {
+      setError(e?.message ?? 'Не удалось удалить голос');
+    } finally {
+      setDeletingVoiceId(null);
     }
   }
 
@@ -517,8 +632,58 @@ export default function ProjectPage() {
     }, 2000);
   }
 
+  const activeBookId = lastUploadedBookId ?? projectBooks[0]?.id ?? null;
+
+  async function fetchPreviewFragments() {
+    if (!isAppApiEnabled()) return;
+    if (!activeBookId) {
+      setPreviewError('Сначала загрузите книгу');
+      setPreviewFragmentUrls(null);
+      return;
+    }
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      const urls = await getPreviewBySpeakers(activeBookId, selectedVoiceIds, speakerSettings);
+      setPreviewFragmentUrls(urls);
+    } catch (e: any) {
+      setPreviewError(e?.message ?? 'Не удалось загрузить превью');
+      setPreviewFragmentUrls(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  async function reFetchPreviewFragments() {
+    if (!isAppApiEnabled()) return;
+    if (!activeBookId) {
+      setPreviewError('Сначала загрузите книгу');
+      setPreviewFragmentUrls(null);
+      return;
+    }
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      const urls = await getPreviewBySpeakers(activeBookId, selectedVoiceIds, speakerSettings);
+      setPreviewFragmentUrls(urls);
+    } catch (e: any) {
+      setPreviewError(e?.message ?? 'Не удалось переозвучить превью');
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  function updateSpeakerSettingsTempoPitch(tempo: number, pitch: number) {
+    setSpeakerSettings((prev) => ({
+      narrator: { ...prev.narrator, tempo, pitch },
+      male: { ...prev.male, tempo, pitch },
+      female: { ...prev.female, tempo, pitch },
+    }));
+  }
+
   async function generateAudio() {
-    const hasFiles = uploadedFiles.length > 0 || (isAppApiEnabled() && lastUploadedBookId);
+    const appBookId = lastUploadedBookId ?? projectBooks[0]?.id ?? null;
+    const hasFiles = uploadedFiles.length > 0 || (isAppApiEnabled() && appBookId);
     if (!hasFiles) {
       setError('Сначала загрузите файлы проекта');
       return;
@@ -531,7 +696,7 @@ export default function ProjectPage() {
     setProcessingProgress(0);
 
     const appApiUrl = process.env.NEXT_PUBLIC_APP_API_URL ?? '';
-    if (appApiUrl && lastUploadedBookId) {
+    if (appApiUrl && appBookId) {
       if (finalBookAudioUrlRef.current) {
         URL.revokeObjectURL(finalBookAudioUrlRef.current);
         finalBookAudioUrlRef.current = null;
@@ -540,13 +705,13 @@ export default function ProjectPage() {
       setChaptersReadyFromApp([]);
       try {
         await putAudioConfigVoiceIds(selectedVoiceIds, { ttsEngine });
-        const stage4Res = await processBookStage4(lastUploadedBookId, 500, selectedVoiceIds, ttsEngine);
+        const stage4Res = await processBookStage4(appBookId, 500, selectedVoiceIds, ttsEngine, speakerSettings, forceReSynthesize);
         if (stage4Res.remaining_tasks === 0 && stage4Res.all_lines_done) {
           setError(
-            'Все строки уже озвучены. Чтобы переозвучить, смените движок TTS (например на XTTS2) или голоса и нажмите «Сгенерировать озвучку» снова.'
+            'Все строки уже озвучены. Включите «Принудительно переозвучить» или смените движок TTS/голоса и нажмите «Сгенерировать озвучку» снова.'
           );
         }
-        startAppProgressTracking(lastUploadedBookId);
+        startAppProgressTracking(appBookId);
       } catch (e: any) {
         const msg = e?.message ?? '';
         const isNetworkError = /failed to fetch|network error|load failed/i.test(msg) || msg === '';
@@ -587,12 +752,14 @@ export default function ProjectPage() {
     setError(null);
     try {
       await apiJson(`/api/projects/${projectId}/complete`, { method: 'POST' });
-      // Начинаем отслеживание статуса полной обработки
+      // Обновляем проект в состоянии (status может стать queued/processing)
+      await loadAll({ silent: true });
       startFullProcessingTracking();
     } catch (e: any) {
       setError(e?.message ?? 'Не удалось отправить книгу на полную обработку');
       setIsFullProcessing(false);
       setFullProcessingStatus('error');
+      // Страницу не ломаем — только сообщение пользователю
     } finally {
       setCompleting(false);
     }
@@ -711,57 +878,78 @@ export default function ProjectPage() {
       uploadErrorTimeoutRef.current = null;
     }
 
-    const appApiUrl = process.env.NEXT_PUBLIC_APP_API_URL ?? '';
-
     try {
-      if (appApiUrl) {
+      if (isAppApiEnabled()) {
         const bookIds: string[] = [];
-        const userId = getStoredUserId() ?? (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_DEV_USER_ID) ?? 'anonymous';
+        const rawUserId = getStoredUserId() ?? (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_DEV_USER_ID) ?? 'anonymous';
+        const userId = typeof rawUserId === 'string' ? rawUserId : 'anonymous';
+        // Прокси загрузки: POST /upload-book (корень; /api/* уходит в Nest по rewrite)
+        const uploadUrl =
+          typeof window !== 'undefined'
+            ? new URL('/upload-book', window.location.origin).href
+            : '/upload-book';
         for (const fileData of uploadedFiles) {
           const formData = new FormData();
           formData.append('file', fileData.file);
           if (project?.title?.trim()) formData.append('project_title', project.title.trim());
-          const response = await fetch(`${appApiUrl.replace(/\/$/, '')}/api/books/upload`, {
+          const response = await fetch(uploadUrl, {
             method: 'POST',
             headers: {
               'X-User-Id': userId,
               'X-Project-Id': projectId,
             },
             body: formData,
+            credentials: 'include',
           });
 
+          const text = await response.text();
+          // #region agent log
+          try {
+            fetch('http://127.0.0.1:7653/ingest/197dff00-57dd-45ca-809c-c08d9512ccf4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '9376b5' }, body: JSON.stringify({ sessionId: '9376b5', hypothesisId: 'upload-fe', location: 'projects/[id]/page:upload', message: 'Upload response', data: { uploadUrl, status: response.status, ok: response.ok, bodyPreview: text?.slice(0, 300) }, timestamp: Date.now() }) }).catch(() => {});
+          } catch (_) {}
+          // #endregion
+          let msg = 'Загрузка не удалась, повторите попытку';
+
           if (response.status === 422) {
-            setUploadError('Загрузка не удалась, повторите попытку');
-            uploadErrorTimeoutRef.current = setTimeout(() => {
-              setUploadError(null);
-              uploadErrorTimeoutRef.current = null;
-            }, 15000);
+            try {
+              const j = JSON.parse(text) as { detail?: string };
+              if (typeof j?.detail === 'string') msg = j.detail;
+            } catch {}
+            setUploadError(msg);
+            uploadErrorTimeoutRef.current = setTimeout(() => setUploadError(null), 15000);
+            setUploadInProgress(false);
             return;
           }
 
           if (!response.ok) {
-            const text = await response.text();
-            let msg = text;
             try {
-              const j = JSON.parse(text);
-              if (typeof (j as { detail?: string }).detail === 'string') msg = (j as { detail: string }).detail;
+              const j = JSON.parse(text) as { detail?: string };
+              if (typeof j?.detail === 'string') msg = j.detail;
+              else if (response.status === 502) msg = j?.detail ?? 'Core API недоступен. Запустите сервис core (порт 8000) или проверьте APP_API_PROXY_TARGET в Docker.';
             } catch {}
-            setUploadError('Загрузка не удалась, повторите попытку');
-            uploadErrorTimeoutRef.current = setTimeout(() => {
-              setUploadError(null);
-              uploadErrorTimeoutRef.current = null;
-            }, 15000);
+            setUploadError(msg);
+            uploadErrorTimeoutRef.current = setTimeout(() => setUploadError(null), 15000);
+            setUploadInProgress(false);
             return;
           }
 
-          const data = (await response.json()) as { id?: string; status?: string };
+          let data: { id?: string; status?: string } = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {}
           if (typeof data?.id === 'string') bookIds.push(data.id);
         }
         setUploadedFiles((prev) => prev.map((f, i) => ({ ...f, bookId: bookIds[i] ?? f.bookId })));
         if (bookIds.length > 0) setLastUploadedBookId(bookIds[bookIds.length - 1]);
         setUploadSuccess(true);
-        await loadAll({ silent: true });
         setUploadedFiles([]);
+        setUploadInProgress(false);
+        // Обновляем список книг в фоне; не показываем ошибку, если бек уже принял книгу (GET /books 200)
+        try {
+          await loadAll({ silent: true });
+        } catch (e) {
+          console.warn('[Upload] Refresh after upload failed (book already saved):', e);
+        }
         return;
       }
 
@@ -770,7 +958,7 @@ export default function ProjectPage() {
         await cacheProjectFile(projectId, fileData.file);
       }
 
-      const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+      const base = API_BASE;
       const token = getAccessToken();
 
       for (const fileData of uploadedFiles) {
@@ -786,15 +974,25 @@ export default function ProjectPage() {
 
         if (!response.ok) {
           const text = await response.text();
-          throw new Error(`Ошибка загрузки файла ${fileData.name}: ${text || 'Не удалось загрузить файл'}`);
+          let msg = text || 'Не удалось загрузить файл';
+          try {
+            const j = JSON.parse(text);
+            if (typeof (j as { message?: string }).message === 'string') msg = (j as { message: string }).message;
+            else if (typeof (j as { error?: string }).error === 'string') msg = (j as { error: string }).error;
+          } catch {
+            /* оставляем msg как text */
+          }
+          throw new Error(msg);
         }
       }
 
       setUploadSuccess(true);
+      setUploadError(null);
       await loadAll({ silent: true });
     } catch (e: any) {
-      setError(e?.message ?? 'Не удалось загрузить файлы');
-      setUploadError('Загрузка не удалась, повторите попытку');
+      const errMsg = e?.message ?? 'Не удалось загрузить файлы';
+      setError(errMsg);
+      setUploadError(errMsg);
       uploadErrorTimeoutRef.current = setTimeout(() => {
         setUploadError(null);
         uploadErrorTimeoutRef.current = null;
@@ -935,9 +1133,18 @@ export default function ProjectPage() {
     return { narrator, male, female };
   }, [voices]);
 
+  /** Свои (пользовательские) голоса: не встроенные narrator/male/female. Для блока «Свои голоса» и кнопки Удалить. */
+  const customVoices = useMemo(
+    () => voices.filter((v) => !['narrator', 'male', 'female'].includes(v.id)),
+    [voices]
+  );
+
   function getVoiceSampleUrl(voiceId: string): string | null {
-    if (isAppApiEnabled()) return null;
-    const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+    if (isAppApiEnabled()) {
+      const url = getAppApiVoiceSampleUrl(voiceId);
+      return url || null;
+    }
+    const base = API_BASE;
     return `${base}/api/voices/${voiceId}/sample`;
   }
 
@@ -1077,25 +1284,25 @@ export default function ProjectPage() {
       {
         id: 1,
         title: 'Выберите Голоса и Загрузите текст',
-        completed: step1Completed,
+        completed: Boolean(step1Completed),
         active: activeStepId === 1,
       },
       {
         id: 2,
         title: 'Отправьте на предварительную озвучку',
-        completed: step2Completed,
+        completed: Boolean(step2Completed),
         active: activeStepId === 2,
       },
       {
         id: 3,
         title: 'Прослушайте получившийся предварительный результат',
-        completed: step3Completed,
+        completed: Boolean(step3Completed),
         active: activeStepId === 3,
       },
       {
         id: 4,
         title: 'Создайте итоговую аудио-книгу',
-        completed: step4Completed,
+        completed: Boolean(step4Completed),
         active: activeStepId === 4,
       },
     ];
@@ -1253,6 +1460,131 @@ export default function ProjectPage() {
               <span className="text-sm text-text">XTTS2</span>
             </label>
           </div>
+        </div>
+      )}
+
+      {/* Свои голоса: загрузка и список (только на странице проекта, только при включённом App API) */}
+      {!isCompleted && isAppApiEnabled() && (
+        <div className="space-y-3 rounded-2xl border border-border bg-surfaceSoft p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-base font-medium text-text">Свои голоса</div>
+              <div className="text-xs text-textSecondary">
+                Загрузите WAV-файл для использования в ролях диктора, мужского или женского голоса.
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setShowAddVoiceForm((v) => !v);
+                setVoiceUploadError(null);
+                if (!showAddVoiceForm && voiceFileInputRef.current) voiceFileInputRef.current.value = '';
+              }}
+              disabled={voiceUploading}
+            >
+              {showAddVoiceForm ? 'Отмена' : 'Добавить голос'}
+            </Button>
+          </div>
+          {showAddVoiceForm && (
+            <div className="space-y-3 rounded-lg border border-border bg-surface p-3">
+              <input
+                ref={voiceFileInputRef}
+                type="file"
+                accept=".wav,audio/wav"
+                className="block w-full text-sm text-text file:mr-2 file:rounded file:border-0 file:bg-accent/20 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-primary"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  setVoiceUploadFile(f ?? null);
+                  setVoiceUploadError(null);
+                }}
+              />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-textSecondary mb-1">Имя (необязательно)</label>
+                  <input
+                    type="text"
+                    className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text outline-none focus:border-accent"
+                    placeholder="Мой голос"
+                    value={voiceUploadName}
+                    onChange={(e) => setVoiceUploadName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-textSecondary mb-1">Роль (необязательно)</label>
+                  <select
+                    className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text outline-none focus:border-accent"
+                    value={voiceUploadRole}
+                    onChange={(e) => setVoiceUploadRole((e.target.value || '') as 'narrator' | 'male' | 'female' | '')}
+                  >
+                    <option value="">—</option>
+                    <option value="narrator">Диктор</option>
+                    <option value="male">Мужской</option>
+                    <option value="female">Женский</option>
+                  </select>
+                </div>
+              </div>
+              {voiceUploadError && (
+                <p className="text-sm text-red-600 dark:text-red-400">{voiceUploadError}</p>
+              )}
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => void handleUploadVoice()}
+                disabled={!voiceUploadFile || voiceUploading}
+              >
+                {voiceUploading ? 'Загрузка…' : 'Загрузить'}
+              </Button>
+            </div>
+          )}
+          {customVoices.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-text">Загруженные голоса</div>
+              <ul className="space-y-1">
+                {customVoices.map((v) => {
+                  const isPlaying = playingVoiceId === v.id;
+                  const isDeleting = deletingVoiceId === v.id;
+                  return (
+                    <li
+                      key={v.id}
+                      className="flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <span className="text-sm font-medium text-text">{v.name}</span>
+                        <span className="ml-2 text-xs text-textSecondary">
+                          {v.gender !== 'neutral' ? v.gender : 'диктор'}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handlePlayVoice(v)}
+                        className="shrink-0 rounded p-1.5 text-textSecondary hover:bg-accent/20 transition-colors"
+                        aria-label={isPlaying ? 'Остановить' : 'Прослушать'}
+                      >
+                        {isPlaying ? (
+                          <Pause className="h-3.5 w-3.5 fill-current" />
+                        ) : (
+                          <Play className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteVoice(v.id)}
+                        disabled={isDeleting}
+                        className="shrink-0 rounded p-1.5 text-textSecondary hover:text-red-600 hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50"
+                        aria-label="Удалить голос"
+                        title="Удалить голос"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 
@@ -1453,6 +1785,93 @@ export default function ProjectPage() {
         </div>
       )}
 
+      {/* Озвучить фрагмент — показывается после загрузки книги (lastUploadedBookId / выбранная книга в App) */}
+      {!isCompleted && isAppApiEnabled() && activeBookId && (
+        <div className="space-y-4 rounded-2xl border border-border bg-surfaceSoft p-4">
+          <div className="text-base font-medium text-text">Превью по спикерам</div>
+          <p className="text-sm text-textSecondary">
+            Получите три фрагмента (диктор, мужской, женский голос) для предпрослушивания перед полной озвучкой.
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              variant="outline"
+              disabled={
+                previewLoading ||
+                (!selectedVoiceIds.narrator && !selectedVoiceIds.male && !selectedVoiceIds.female)
+              }
+              onClick={() => void fetchPreviewFragments()}
+            >
+              {previewLoading ? 'Загрузка…' : 'Озвучить фрагмент'}
+            </Button>
+          </div>
+          {previewError && (
+            <p className="text-sm text-red-600 dark:text-red-400">{previewError}</p>
+          )}
+          {previewFragmentUrls && (previewFragmentUrls.narrator || previewFragmentUrls.male || previewFragmentUrls.female) && (
+            <div className="space-y-4 pt-2">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {previewFragmentUrls.narrator && (
+                  <div className="rounded-lg border border-border bg-surface p-3">
+                    <div className="text-sm font-medium text-text mb-2">Диктор</div>
+                    <audio controls className="w-full" src={previewFragmentUrls.narrator} />
+                  </div>
+                )}
+                {previewFragmentUrls.male && (
+                  <div className="rounded-lg border border-border bg-surface p-3">
+                    <div className="text-sm font-medium text-text mb-2">Мужской голос</div>
+                    <audio controls className="w-full" src={previewFragmentUrls.male} />
+                  </div>
+                )}
+                {previewFragmentUrls.female && (
+                  <div className="rounded-lg border border-border bg-surface p-3">
+                    <div className="text-sm font-medium text-text mb-2">Женский голос</div>
+                    <audio controls className="w-full" src={previewFragmentUrls.female} />
+                  </div>
+                )}
+              </div>
+              {/* Ползунки скорость и тембр — одна пара для всех спикеров (Вариант A) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-text mb-1">
+                    Скорость (tempo): {(speakerSettings.narrator?.tempo ?? 1).toFixed(2)}
+                  </label>
+                  <input
+                    type="range"
+                    min={0.7}
+                    max={1.3}
+                    step={0.05}
+                    value={speakerSettings.narrator?.tempo ?? 1}
+                    onChange={(e) => updateSpeakerSettingsTempoPitch(parseFloat(e.target.value), speakerSettings.narrator?.pitch ?? 0)}
+                    className="w-full h-2 rounded-lg appearance-none bg-surfaceSoft accent-primary"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-text mb-1">
+                    Тембр (pitch): {(speakerSettings.narrator?.pitch ?? 0).toFixed(2)}
+                  </label>
+                  <input
+                    type="range"
+                    min={-0.5}
+                    max={0.5}
+                    step={0.05}
+                    value={speakerSettings.narrator?.pitch ?? 0}
+                    onChange={(e) => updateSpeakerSettingsTempoPitch(speakerSettings.narrator?.tempo ?? 1, parseFloat(e.target.value))}
+                    className="w-full h-2 rounded-lg appearance-none bg-surfaceSoft accent-primary"
+                  />
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                disabled={previewLoading}
+                onClick={() => void reFetchPreviewFragments()}
+              >
+                {previewLoading ? 'Запрос…' : 'Переозвучить фрагмент'}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Секция загрузки файла и генерации */}
       {!isCompleted && (
         <div className="space-y-4">
@@ -1637,11 +2056,22 @@ export default function ProjectPage() {
                       : 'Загрузить файлы на сервер'}
                 </Button>
               )}
+              {isAppApiEnabled() && (lastUploadedBookId ?? projectBooks[0]?.id) && (
+                <label className="flex items-center gap-2 text-sm text-textSecondary cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={forceReSynthesize}
+                    onChange={(e) => setForceReSynthesize(e.target.checked)}
+                    className="rounded border-border"
+                  />
+                  Принудительно переозвучить (отправить все строки в stage4)
+                </label>
+              )}
               <Button
                 disabled={
                   generating ||
                   !canEdit ||
-                  (uploadedFiles.length === 0 && (!isAppApiEnabled() || !lastUploadedBookId))
+                  (uploadedFiles.length === 0 && (!isAppApiEnabled() || !(lastUploadedBookId ?? projectBooks[0]?.id)))
                 }
                 onClick={generateAudio}
               >
@@ -1684,7 +2114,7 @@ export default function ProjectPage() {
               Прослушайте готовые фрагменты предварительной озвучки перед отправкой на полную обработку.
             </div>
           </div>
-          <button onClick={loadAll} className="text-sm text-primary dark:text-accent hover:text-text hover:underline transition-colors">
+          <button onClick={() => loadAll()} className="text-sm text-primary dark:text-accent hover:text-text hover:underline transition-colors">
             Обновить
           </button>
         </div>
@@ -1697,15 +2127,19 @@ export default function ProjectPage() {
                 Можно слушать готовые главы, не дожидаясь полной озвучки книги.
               </p>
               <div className="flex flex-wrap gap-2">
-                {chaptersReadyFromApp.map((num) => (
-                  <audio
-                    key={num}
-                    controls
-                    className="w-full min-w-[200px]"
-                    src={getBookChapterAudioUrl(lastUploadedBookId, num)}
-                    title={`Глава ${num}`}
-                  />
-                ))}
+                {chaptersReadyFromApp.map((num) => {
+                  const chapterSrc = getBookChapterAudioUrl(lastUploadedBookId, num);
+                  if (!chapterSrc) return null;
+                  return (
+                    <audio
+                      key={num}
+                      controls
+                      className="w-full min-w-[200px]"
+                      src={chapterSrc}
+                      title={`Глава ${num}`}
+                    />
+                  );
+                })}
               </div>
               <div className="flex flex-wrap gap-1 pt-1">
                 {chaptersReadyFromApp.map((num) => (
@@ -1727,7 +2161,7 @@ export default function ProjectPage() {
             </div>
           ) : (
             previewAudios.map((audio) => {
-              const audioSrc = `${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000'}/api/audios/${audio.id}/stream`;
+              const audioSrc = `${API_BASE}/api/audios/${audio.id}/stream`;
               return (
                 <div key={audio.id} className="rounded-lg border border-border bg-surface p-3">
                   <div className="flex items-center justify-between gap-4 mb-2">
@@ -1796,7 +2230,7 @@ export default function ProjectPage() {
       })()}
       
       {/* Секция со списком глав после завершения обработки */}
-      {chapters.length > 0 && (
+      {(chapters.length > 0 || chaptersError) && (
         <div className="mt-6 rounded-2xl border border-border bg-surfaceSoft p-4">
           <div className="mb-4">
             <div className="font-medium text-text">Главы книги</div>
@@ -1804,11 +2238,13 @@ export default function ProjectPage() {
               Прослушайте все главы перед созданием финальной аудио книги.
             </div>
           </div>
-          
+          {chaptersError ? (
+            <p className="text-sm text-amber-600 dark:text-amber-400">{chaptersError}</p>
+          ) : null}
           <div className="space-y-3">
             {chapters.map((chapter) => {
               const chapterAudioSrc = chapter.audioId
-                ? `${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000'}/api/audios/${chapter.audioId}/stream`
+                ? `${API_BASE}/api/audios/${chapter.audioId}/stream`
                 : undefined;
               return (
                 <div key={chapter.id} className="rounded-lg border border-border bg-surface p-3">

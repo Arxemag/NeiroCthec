@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsString, MaxLength, Min } from '../../lib/validators';
 
 export class CreateBookFromProjectDto {
   @IsString()

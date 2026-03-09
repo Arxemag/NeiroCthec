@@ -59,13 +59,31 @@ class ExternalHTTPSynthesizer:
         }
         if getattr(request, "speaker_wav_path", None):
             payload["speaker_wav_path"] = request.speaker_wav_path
-        resp = self._requests.post(
-            f"{self.base_url}/synthesize",
-            json=payload,
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        output_path.write_bytes(resp.content)
+        url = f"{self.base_url}/synthesize"
+        import logging
+        log = logging.getLogger(__name__)
+        log.info("External TTS request: POST %s book_id=%s line_id=%s", url, getattr(request, "book_id", ""), getattr(request, "line_id", ""))
+        max_retries = 2  # при ReadTimeout повторить (первый запрос может грузить модель)
+        last_exc = None
+        for attempt in range(max_retries + 1):
+            try:
+                resp = self._requests.post(
+                    url,
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                output_path.write_bytes(resp.content)
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries and ("timed out" in str(exc).lower() or "read timeout" in str(exc).lower()):
+                    log.warning("TTS request timed out, retry %s/%s", attempt + 1, max_retries)
+                    continue
+                raise
+        else:
+            if last_exc is not None:
+                raise last_exc
         # Примерная длительность по размеру: 16-bit mono 22kHz ≈ 44k bytes/sec
         size = output_path.stat().st_size
         duration_sec = size / (22050 * 2)

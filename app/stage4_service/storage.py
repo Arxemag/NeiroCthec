@@ -29,3 +29,17 @@ class LocalObjectStorage:
             return str(p.relative_to(self.base))
         except ValueError:
             return str(p.resolve())
+
+    def path_for_preview(self, user_id: str, book_id: str, role: str) -> Path:
+        """Путь для превью по спикеру: books/{user_id}/{book_id}/preview_{role}.wav."""
+        p = self.base / "books" / user_id / book_id / f"preview_{role}.wav"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def uri_for_preview(self, user_id: str, book_id: str, role: str) -> str:
+        """URI превью относительно корня storage."""
+        p = self.path_for_preview(user_id, book_id, role)
+        try:
+            return str(p.relative_to(self.base))
+        except ValueError:
+            return str(p.resolve())

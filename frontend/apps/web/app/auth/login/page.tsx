@@ -4,10 +4,9 @@ import { useState } from 'react';
 import { Button } from '../../../components/ui';
 import { Card } from '../../../components/ui/card';
 import { setAccessToken, setStoredUserId } from '../../../lib/auth';
+import { API_BASE } from '../../../lib/api';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
 
 type LoginResponse = { accessToken: string };
 

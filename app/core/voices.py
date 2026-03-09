@@ -1,6 +1,15 @@
 """
 Реестр голосов для отдачи в API (список спикеров с ролями: диктор, мужской, женский).
 Использует TTS_VOICES_ROOT и SHARED_STORAGE_ROOT, без зависимости от tts_engine_service.
+
+Источники голосов (в порядке приоритета):
+1) Дефолтные (встроенные): narrator.wav, male.wav, female.wav в корне каталога голосов.
+   Показываются как «Диктор», «Мужской голос», «Женский голос».
+   Каталог: TTS_VOICES_ROOT или app/storage/voices или SHARED_STORAGE_ROOT/voices.
+2) Обнаруженные: любые другие .wav в том же корне (не в подпапках). Имя в списке берётся
+   из имени файла без расширения (например anna.wav → «Anna», maxim.wav → «Maxim»).
+   Отсюда появляются «Анна», «Максим» и т.п. — если такие файлы лежат в папке голосов.
+3) Свои голоса пользователя: storage/voices/{user_id}/*.wav (загрузка через POST /voices/upload).
 """
 from __future__ import annotations
 
@@ -12,6 +21,9 @@ from typing import TypedDict
 VOICE_ROLE_NARRATOR = "narrator"
 VOICE_ROLE_MALE = "male"
 VOICE_ROLE_FEMALE = "female"
+
+# Дефолтные голоса: id и имена. Появляются в списке только если есть файлы narrator.wav, male.wav, female.wav.
+DEFAULT_VOICE_IDS = ("narrator", "male", "female")
 
 # Маппинг id -> роль (для встроенных и типичных имён)
 _ID_TO_ROLE: dict[str, str] = {
@@ -46,6 +58,13 @@ def _voices_root() -> Path:
         p = Path(raw)
         return p if p.is_absolute() else _app_root() / raw
     return _app_root() / "storage" / "voices"
+
+
+def _user_voices_dir(user_id: str) -> Path:
+    """Каталог своих голосов пользователя: storage/voices/{user_id}/."""
+    if not (user_id or "").strip():
+        raise ValueError("user_id is required for user voices dir")
+    return _voices_root() / (user_id or "").strip()
 
 
 def _shared_storage_root() -> Path:
@@ -95,9 +114,14 @@ class VoiceEntry(TypedDict):
     name: str
 
 
-def get_voice_registry() -> list[VoiceEntry]:
+# Встроенные id, которые нельзя удалять через DELETE /voices/{id}
+BUILTIN_VOICE_IDS = frozenset({"narrator", "male", "female"})
+
+
+def get_voice_registry(user_id: str | None = None) -> list[VoiceEntry]:
     """
     Собирает список голосов: встроенные (narrator, male, female) + обнаруженные .wav в TTS_VOICES_ROOT.
+    Если передан user_id — добавляет свои голоса из storage/voices/{user_id}/*.wav.
     Каждый голос имеет id, path, source, role (narrator|male|female), name (для отображения).
     """
     result: list[VoiceEntry] = []
@@ -122,7 +146,7 @@ def get_voice_registry() -> list[VoiceEntry]:
                 seen.add(sid)
                 break
 
-    # 2) Обнаруженные .wav: имя файла без расширения = id
+    # 2) Обнаруженные .wav в общем каталоге (не в подпапках user_id)
     for base in (root, shared_voices):
         if not base.exists():
             continue
@@ -140,12 +164,39 @@ def get_voice_registry() -> list[VoiceEntry]:
                 name=_display_name(sid, role),
             ))
 
+    # 3) Свои голоса пользователя: storage/voices/{user_id}/*.wav
+    uid = (user_id or "").strip() if user_id else ""
+    if uid:
+        user_dir = _user_voices_dir(uid)
+        if user_dir.exists():
+            for f in sorted(user_dir.glob("*.wav")):
+                sid = f.stem  # сохраняем как есть (uuid), не lower
+                if not sid or sid in seen:
+                    continue
+                seen.add(sid)
+                result.append(VoiceEntry(
+                    id=sid,
+                    path=str(f.resolve()),
+                    source="user",
+                    role=VOICE_ROLE_NARRATOR,
+                    name=f.name,
+                ))
+
     return result
 
 
-def get_voice_path(voice_id: str) -> str | None:
-    """Возвращает абсолютный путь к файлу сэмпла по id или None."""
-    for v in get_voice_registry():
+def get_voice_path(voice_id: str, user_id: str | None = None) -> str | None:
+    """
+    Возвращает абсолютный путь к файлу сэмпла по id или None.
+    Сначала ищет в общем реестре (встроенные + обнаруженные). Если не найден и передан user_id —
+    проверяет storage/voices/{user_id}/{voice_id}.wav.
+    """
+    for v in get_voice_registry(user_id=None):
         if v["id"] == voice_id:
             return v["path"]
+    if user_id and (uid := (user_id or "").strip()):
+        user_dir = _user_voices_dir(uid)
+        candidate = user_dir / f"{voice_id}.wav"
+        if candidate.is_file():
+            return str(candidate.resolve())
     return None

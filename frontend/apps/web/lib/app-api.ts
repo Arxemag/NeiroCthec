@@ -1,21 +1,36 @@
 /**
  * Клиент для Python App API (порт 8000).
  * Все запросы требуют заголовок X-User-Id.
- * Базовый URL задаётся через NEXT_PUBLIC_APP_API_URL (по умолчанию http://localhost:8000 для разработки).
+ * Базовый URL задаётся через NEXT_PUBLIC_APP_API_URL.
+ * Варианты:
+ * - http://localhost:8000 — прямое обращение к Core (для локальной разработки).
+ * - proxy — запросы идут на тот же хост через /app-api (Next.js проксирует на Core); удобно в Docker при доступе по IP.
  */
 
 import { getStoredUserId } from './auth';
 
-const APP_API_BASE =
-  (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_APP_API_URL?.trim()) ||
-  (typeof window !== 'undefined' ? 'http://localhost:8000' : '');
+const RAW = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_APP_API_URL?.trim()) || '';
+const USE_PROXY = RAW.toLowerCase() === 'proxy';
+const APP_API_BASE = USE_PROXY ? '' : (RAW || (typeof window !== 'undefined' ? 'http://localhost:8000' : ''));
+
+const APP_API_PROXY_PREFIX = '/app-api';
 
 export function getAppApiUrl(): string {
-  return APP_API_BASE.replace(/\/$/, '');
+  if (USE_PROXY) return '';
+  return (APP_API_BASE as string).replace(/\/$/, '');
 }
 
 export function isAppApiEnabled(): boolean {
-  return Boolean(APP_API_BASE?.trim());
+  return USE_PROXY || Boolean((APP_API_BASE as string)?.trim());
+}
+
+/** URL сэмпла голоса для <audio src> (через прокси или прямой Core). */
+export function getAppApiVoiceSampleUrl(voiceId: string): string {
+  if (USE_PROXY && typeof window !== 'undefined') {
+    return `${window.location.origin}${APP_API_PROXY_PREFIX}/voices/${encodeURIComponent(voiceId)}/sample`;
+  }
+  const base = getAppApiUrl();
+  return base ? `${base.replace(/\/$/, '')}/voices/${encodeURIComponent(voiceId)}/sample` : '';
 }
 
 function getAppHeaders(init?: RequestInit): Headers {
@@ -31,24 +46,26 @@ function getAppHeaders(init?: RequestInit): Headers {
 /** GET/POST к app без JSON body (для JSON body используйте appJson). */
 export async function appFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const base = getAppApiUrl();
-  if (!base) {
+  const pathNorm = path.startsWith('/') ? path : `/${path}`;
+  const url = USE_PROXY ? `${APP_API_PROXY_PREFIX}${pathNorm}` : `${base}${pathNorm}`;
+  if (!USE_PROXY && !base) {
     throw new Error(
-      'App API недоступен: задайте NEXT_PUBLIC_APP_API_URL в .env (например http://localhost:8000) или запустите Core API на порту 8000.',
+      'App API недоступен: задайте NEXT_PUBLIC_APP_API_URL в .env (например http://localhost:8000 или proxy) или запустите Core API на порту 8000.',
     );
   }
   const headers = getAppHeaders(init);
   if (typeof init.body === 'string' && init.body.length > 0) {
     headers.set('Content-Type', 'application/json');
   }
-  const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
   let res: Response;
   try {
     res = await fetch(url, { ...init, headers, credentials: 'include' });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(
-      `Не удалось подключиться к App API (${base}). Запустите сервер (python main.py в папке app) или проверьте сеть. Ошибка: ${msg}`,
-    );
+    const hint = USE_PROXY
+      ? 'Проверьте, что Core запущен и Next.js проксирует /app-api на него (APP_API_PROXY_TARGET).'
+      : `Запустите Core (python main.py в папке app) или при доступе по IP задайте NEXT_PUBLIC_APP_API_URL=proxy.`;
+    throw new Error(`Не удалось подключиться к App API. ${hint} Ошибка: ${msg}`);
   }
   return res;
 }
@@ -105,15 +122,18 @@ export type AppProcessBookStage4Response = {
   all_lines_done?: boolean;
 };
 
-/** POST /books/upload — загрузка файла .txt, .fb2, .epub, .mobi */
+/** POST загрузка книги: при proxy — /upload-book (Next route), иначе Core /api/books/upload */
 export async function uploadBook(file: File): Promise<AppBookUploadResponse> {
-  const base = getAppApiUrl();
-  if (!base) throw new Error('NEXT_PUBLIC_APP_API_URL is not set');
   const formData = new FormData();
   formData.append('file', file);
   const headers = getAppHeaders({ method: 'POST' });
   headers.delete('Content-Type');
-  const res = await fetch(`${base}/api/books/upload`, {
+  const base = getAppApiUrl();
+  const url = USE_PROXY
+    ? (typeof window !== 'undefined' ? new URL('/upload-book', window.location.origin).href : '/upload-book')
+    : (base || '').replace(/\/$/, '') + '/api/books/upload';
+  if (!USE_PROXY && !base) throw new Error('NEXT_PUBLIC_APP_API_URL is not set');
+  const res = await fetch(url, {
     method: 'POST',
     headers,
     body: formData,
@@ -249,14 +269,30 @@ export async function putAudioConfigVoiceIds(
   await appJson<unknown>('/books/settings/audio', { method: 'PUT', body: JSON.stringify({ config }) });
 }
 
-/** POST /internal/process-book-stage4 — запустить озвучку (до max_tasks строк). voice_ids и tts_engine из запроса имеют приоритет над дефолтами. */
+/** Настройки скорости и тембра по спикеру (narrator, male, female). Передаются в processBookStage4 и при превью. */
+export type SpeakerSettings = {
+  narrator?: { tempo?: number; pitch?: number };
+  male?: { tempo?: number; pitch?: number };
+  female?: { tempo?: number; pitch?: number };
+};
+
+/** POST /internal/process-book-stage4 — запустить озвучку (до max_tasks строк). voice_ids, tts_engine, speaker_settings, force (игнорировать готовые wav) из запроса. */
 export async function processBookStage4(
   bookId: string,
   maxTasks = 500,
   voiceIds?: { narrator?: string; male?: string; female?: string },
-  ttsEngine?: TtsEngine
+  ttsEngine?: TtsEngine,
+  speakerSettings?: SpeakerSettings,
+  forceReSynthesize?: boolean
 ): Promise<AppProcessBookStage4Response> {
-  const body: { book_id: string; max_tasks: number; voice_ids?: Record<string, string>; tts_engine?: TtsEngine } = {
+  const body: {
+    book_id: string;
+    max_tasks: number;
+    voice_ids?: Record<string, string>;
+    tts_engine?: TtsEngine;
+    speaker_settings?: SpeakerSettings;
+    force?: boolean;
+  } = {
     book_id: bookId,
     max_tasks: maxTasks,
   };
@@ -267,6 +303,8 @@ export async function processBookStage4(
     if (voiceIds.female) body.voice_ids.female = voiceIds.female;
   }
   if (ttsEngine) body.tts_engine = ttsEngine;
+  if (speakerSettings && Object.keys(speakerSettings).length > 0) body.speaker_settings = speakerSettings;
+  if (forceReSynthesize) body.force = true;
   return appJson<AppProcessBookStage4Response>('/internal/process-book-stage4', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -290,14 +328,118 @@ export type AppVoice = {
   sample_url: string;
 };
 
-/** GET /voices — список доступных голосов с ролями (диктор, мужской, женский) и URL сэмплов */
+/** GET /voices — список доступных голосов с ролями (диктор, мужской, женский) и URL сэмплов. С X-User-Id Core отдаёт встроенные + свои (storage/voices/{user_id}/*.wav). */
 export async function listVoices(): Promise<AppVoice[]> {
   return appJson<AppVoice[]>('/voices');
 }
 
-/** Полный URL для проигрывания сэмпла голоса (для <audio src={...} /> или fetch). */
-export function getVoiceSampleUrl(voiceId: string): string {
+/** POST /voices/upload — загрузить свой голос (WAV). Multipart: file, опционально name, role (narrator|male|female). Заголовок X-User-Id. */
+export async function uploadVoice(
+  file: File,
+  options?: { name?: string; role?: 'narrator' | 'male' | 'female' }
+): Promise<{ id: string; name?: string; role?: string }> {
   const base = getAppApiUrl();
-  if (!base) return '';
-  return `${base}/voices/${encodeURIComponent(voiceId)}/sample`;
+  if (!base) throw new Error('NEXT_PUBLIC_APP_API_URL is not set');
+  const formData = new FormData();
+  formData.append('file', file);
+  if (options?.name?.trim()) formData.append('name', options.name.trim());
+  if (options?.role) formData.append('role', options.role);
+  const headers = getAppHeaders({ method: 'POST' });
+  headers.delete('Content-Type');
+  const res = await fetch(`${base}/voices/upload`, {
+    method: 'POST',
+    headers,
+    body: formData,
+    credentials: 'include',
+  });
+  const text = await res.text();
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+  }
+  if (!res.ok) {
+    const obj = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
+    const message =
+      (typeof (obj as { detail?: string }).detail === 'string' ? (obj as { detail: string }).detail : null) ??
+      (text || `HTTP ${res.status}`);
+    throw new Error(message);
+  }
+  const out = data as { id: string; name?: string; role?: string };
+  return { id: out.id, name: out.name, role: out.role };
+}
+
+/** DELETE /voices/:id — удалить свой голос. Заголовок X-User-Id. */
+export async function deleteVoice(voiceId: string): Promise<void> {
+  const res = await appFetch(`/voices/${encodeURIComponent(voiceId)}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const text = await res.text();
+    let msg = text;
+    try {
+      const j = JSON.parse(text) as { detail?: string };
+      if (typeof j.detail === 'string') msg = j.detail;
+    } catch {}
+    throw new Error(msg || `HTTP ${res.status}`);
+  }
+}
+
+/** Ответ превью по спикерам: URL аудио для narrator, male, female. */
+export type PreviewBySpeakersResponse = {
+  narrator?: string;
+  male?: string;
+  female?: string;
+};
+
+/** Базовый URL для запросов к App API (при proxy — origin + /app-api, иначе getAppApiUrl()). */
+function getPreviewBaseUrl(): string {
+  if (USE_PROXY && typeof window !== 'undefined') {
+    return `${window.location.origin}${APP_API_PROXY_PREFIX}`;
+  }
+  return getAppApiUrl();
+}
+
+/**
+ * Получить 3 фрагмента превью по спикерам (narrator, male, female).
+ * Контракт: POST /internal/preview-by-speakers с book_id, voice_ids, speaker_settings возвращает { narrator, male, female } URL или { narrator: { audio_uri }, ... }.
+ * При proxy запрос идёт через /app-api. При ошибке (404/502 и т.д.) ошибка пробрасывается, чтобы UI показал previewError.
+ */
+export async function getPreviewBySpeakers(
+  bookId: string,
+  voiceIds: { narrator?: string; male?: string; female?: string },
+  speakerSettings?: SpeakerSettings
+): Promise<PreviewBySpeakersResponse> {
+  if (!isAppApiEnabled()) return {};
+  const body: { book_id: string; voice_ids?: Record<string, string>; speaker_settings?: SpeakerSettings } = {
+    book_id: bookId,
+  };
+  if (voiceIds.narrator || voiceIds.male || voiceIds.female) {
+    body.voice_ids = {};
+    if (voiceIds.narrator) body.voice_ids.narrator = voiceIds.narrator;
+    if (voiceIds.male) body.voice_ids.male = voiceIds.male;
+    if (voiceIds.female) body.voice_ids.female = voiceIds.female;
+  }
+  if (speakerSettings && Object.keys(speakerSettings).length > 0) body.speaker_settings = speakerSettings;
+  const res = await appJson<Record<string, unknown>>('/internal/preview-by-speakers', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  const base = getPreviewBaseUrl();
+  const toFull = (u: string) => (u && !u.startsWith('http') ? base.replace(/\/$/, '') + (u.startsWith('/') ? u : `/${u}`) : u);
+  const pickUri = (v: unknown): string | undefined => {
+    if (typeof v === 'string') return v;
+    if (v && typeof v === 'object' && typeof (v as { audio_uri?: string }).audio_uri === 'string') return (v as { audio_uri: string }).audio_uri;
+    return undefined;
+  };
+  const narratorUri = pickUri(res?.narrator);
+  const maleUri = pickUri(res?.male);
+  const femaleUri = pickUri(res?.female);
+  if (narratorUri || maleUri || femaleUri) {
+    return {
+      narrator: narratorUri ? toFull(narratorUri) : undefined,
+      male: maleUri ? toFull(maleUri) : undefined,
+      female: femaleUri ? toFull(femaleUri) : undefined,
+    };
+  }
+  return {};
 }

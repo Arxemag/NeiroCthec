@@ -1,4 +1,11 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadGatewayException,
+  ConflictException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type { VoiceGender, VoiceRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import type { UpdateVoiceDto } from './dto';
@@ -8,14 +15,16 @@ export class VoicesService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(filters: { language?: string; gender?: string; style?: string; role?: string }) {
-    const where: { 
-      isActive: boolean; 
-      language?: string; 
-      gender?: VoiceGender; 
+    const where: {
+      isActive: boolean;
+      provider?: { not: string };
+      language?: string;
+      gender?: VoiceGender;
       style?: string;
       role?: VoiceRole;
     } = {
       isActive: true,
+      provider: { not: 'stub' }, // не отдаём заглушки из сида (Анна, Максим, Alex)
     };
     if (filters.language != null && filters.language !== '') where.language = filters.language;
     if (filters.gender != null && filters.gender !== '') where.gender = filters.gender as VoiceGender;
@@ -26,6 +35,55 @@ export class VoicesService {
       where,
       orderBy: [{ role: 'asc' }, { language: 'asc' }, { name: 'asc' }],
     });
+  }
+
+  /**
+   * Прокси к Core: список голосов (встроенные + свои по X-User-Id). Один источник правды — Core.
+   */
+  async listFromCore(userId: string): Promise<Array<{ id: string; name: string; role?: string; sample_url?: string }>> {
+    const base = process.env.CORE_API_URL ?? process.env.APP_API_URL ?? '';
+    if (!base) {
+      throw new HttpException('Core API not configured: set CORE_API_URL or APP_API_URL', HttpStatus.NOT_IMPLEMENTED);
+    }
+    const url = `${base.replace(/\/$/, '')}/voices`;
+    // #region agent log
+    try {
+      fetch('http://127.0.0.1:7653/ingest/197dff00-57dd-45ca-809c-c08d9512ccf4', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '9376b5' },
+        body: JSON.stringify({
+          sessionId: '9376b5',
+          hypothesisId: 'voices-nest-core',
+          location: 'voices.service.ts:listFromCore',
+          message: 'Nest calling Core for voices',
+          data: { url, userId: userId?.slice(0, 8) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+    } catch (_) {}
+    // #endregion
+    const res = await fetch(url, { headers: { 'X-User-Id': userId } });
+    const text = await res.text();
+    // #region agent log
+    try {
+      fetch('http://127.0.0.1:7653/ingest/197dff00-57dd-45ca-809c-c08d9512ccf4', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '9376b5' },
+        body: JSON.stringify({
+          sessionId: '9376b5',
+          hypothesisId: 'voices-nest-core',
+          location: 'voices.service.ts:listFromCore',
+          message: res.ok ? 'Core voices response' : 'Core voices failed',
+          data: { status: res.status, ok: res.ok, bodyPreview: text?.slice(0, 200) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+    } catch (_) {}
+    // #endregion
+    if (!res.ok) {
+      throw new BadGatewayException(`Core voices failed: ${res.status} ${text}`);
+    }
+    return JSON.parse(text);
   }
 
   async getById(id: string) {

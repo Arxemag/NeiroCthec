@@ -60,6 +60,7 @@ model User {
   subscription       Subscription?
   books              Book[]
   bookSeries         BookSeries[]
+  userVoices        UserVoice[]
 }
 
 model RefreshToken {
@@ -76,22 +77,53 @@ model RefreshToken {
 }
 
 model Project {
-  id           String        @id @default(cuid())
-  userId       String
-  title        String
-  text         String
-  language     String
-  status       ProjectStatus @default(draft)
-  errorMessage String?
-  deletedAt    DateTime?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id              String        @id @default(cuid())
+  userId          String
+  title           String
+  text            String
+  language        String
+  status          ProjectStatus @default(draft)
+  errorMessage    String?
+  speakerSettings Json?         // { narrator?, male?, female?: { tempo?: number, pitch?: number } }
+  deletedAt       DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
-  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  voices ProjectVoice[]
-  audios Audio[]
+  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  voices        ProjectVoice[]
+  audios       Audio[]
+  voiceSettings ProjectVoiceSettings?
+  userVoices   UserVoice[]
 
   @@index([userId])
+}
+
+model UserVoice {
+  id          String    @id @default(cuid())
+  userId      String
+  name        String
+  coreVoiceId String    // ID голоса в Core (встроенный или загруженный пользователем)
+  projectId   String?   // опционально: привязка к проекту
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([projectId])
+}
+
+model ProjectVoiceSettings {
+  id              String  @id @default(cuid())
+  projectId       String  @unique
+  narratorVoiceId String?
+  maleVoiceId     String?
+  femaleVoiceId   String?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
 }
 
 model Voice {

@@ -35,11 +35,12 @@ def _get_synthesizers():
     """Два TTS-сервиса: Qwen3 (8020) и XTTS2 (8021). По задаче выбираем по tts_engine."""
     mode = os.getenv("STAGE4_SYNTH_MODE", "mock").strip().lower()
     timeout = int(os.getenv("EXTERNAL_TTS_TIMEOUT_SEC", "60"))
+    timeout_xtts = int(os.getenv("EXTERNAL_TTS_XTTS_TIMEOUT_SEC", str(timeout)))
     url_qwen3 = os.getenv("EXTERNAL_TTS_QWEN3_URL", os.getenv("EXTERNAL_TTS_URL", "http://host.docker.internal:8020")).strip().rstrip("/")
     url_xtts = os.getenv("EXTERNAL_TTS_XTTS_URL", "http://tts-xtts:8021").strip().rstrip("/")
     return {
         "qwen3": _build_synth(mode, url_qwen3, timeout),
-        "xtts2": _build_synth(mode, url_xtts, timeout),
+        "xtts2": _build_synth(mode, url_xtts, timeout_xtts),
     }
 
 
@@ -51,7 +52,7 @@ def _synth_for_engine(tts_engine: str | None):
     return _synthesizers.get(e) or _synthesizers["qwen3"]
 storage = LocalObjectStorage()
 # Без пробелов и без завершающего слэша, иначе получится /internal%20/tts-next и 404
-core_internal_url = (os.getenv("CORE_INTERNAL_URL", "http://api:8000/internal") or "").strip().rstrip("/")
+core_internal_url = (os.getenv("CORE_INTERNAL_URL", "http://core:8000/internal") or "").strip().rstrip("/")
 # Счётчик опросов с пустой очередью — раз в ~30 сек пишем в лог, что воркер жив и опрашивает core
 _empty_poll_count = 0
 
@@ -61,12 +62,27 @@ def health():
     return {"status": "ok"}
 
 
+def _is_connection_error(exc: BaseException) -> bool:
+    """Проверка: ошибка доступа к сервису (DNS, connection refused, timeout)."""
+    err_str = str(exc).lower()
+    if "nameresolutionerror" in err_str or "failed to resolve" in err_str or "no address associated" in err_str:
+        return True
+    if "connectionrefused" in err_str or "connection refused" in err_str:
+        return True
+    if "max retries exceeded" in err_str or "timeout" in err_str:
+        return True
+    return False
+
+
 @app.post("/tts", response_model=TTSResponse)
 def tts(request: TTSRequest):
     engine = (getattr(request, "tts_engine", None) or "qwen3").strip().lower()
     synth = _synth_for_engine(engine)
-    url = getattr(synth, "base_url", None) or "(mock)"
-    logger.info("tts task book_id=%s line_id=%s engine=%s url=%s", request.book_id, request.line_id, engine, url)
+    url_xtts = os.getenv("EXTERNAL_TTS_XTTS_URL", "http://tts-xtts:8021").strip().rstrip("/")
+    logger.info(
+        "TTS engine=%s book_id=%s line_id=%s (xtts_url=%s when engine=xtts2)",
+        engine, request.book_id, request.line_id, url_xtts if engine == "xtts2" else "n/a",
+    )
     try:
         relative = Path(request.user_id) / request.book_id / f"line_{request.line_id}.wav"
         tmp_path = Path(tempfile.gettempdir()) / relative
@@ -76,7 +92,112 @@ def tts(request: TTSRequest):
         audio_uri = storage.uri_for_line(request.user_id, request.book_id, request.line_id)
         return TTSResponse(task_id=request.task_id, status=TTSStatus.DONE, audio_uri=audio_uri, duration_ms=duration_ms)
     except Exception as exc:
+        # Если Qwen3 недоступен (контейнер не запущен и т.д.) — повторить через XTTS2
+        if engine == "qwen3" and _is_connection_error(exc):
+            logger.warning(
+                "Qwen3 unreachable (%s), falling back to XTTS2 for book_id=%s line_id=%s",
+                exc, request.book_id, request.line_id,
+            )
+            synth_xtts = _synth_for_engine("xtts2")
+            try:
+                relative = Path(request.user_id) / request.book_id / f"line_{request.line_id}.wav"
+                tmp_path = Path(tempfile.gettempdir()) / relative
+                duration_ms = synth_xtts.synthesize(request=request, output_path=tmp_path)
+                target = storage.path_for_line(request.user_id, request.book_id, request.line_id)
+                shutil.copyfile(tmp_path, target)
+                audio_uri = storage.uri_for_line(request.user_id, request.book_id, request.line_id)
+                return TTSResponse(task_id=request.task_id, status=TTSStatus.DONE, audio_uri=audio_uri, duration_ms=duration_ms)
+            except Exception as exc2:
+                return TTSResponse(task_id=request.task_id, status=TTSStatus.ERROR, error=str(exc2))
         return TTSResponse(task_id=request.task_id, status=TTSStatus.ERROR, error=str(exc))
+
+
+def _preview_one(
+    user_id: str,
+    book_id: str,
+    role: str,
+    text: str,
+    speaker: str,
+    emotion: dict,
+    voice_ids: dict,
+    tts_engine: str,
+    speaker_wav_path: str | None,
+) -> dict:
+    """Синтезирует один превью-фрагмент и возвращает { audio_uri } или { error }."""
+    req = TTSRequest(
+        task_id=f"preview_{role}",
+        user_id=user_id,
+        book_id=book_id,
+        line_id=0,
+        text=text,
+        speaker=speaker,
+        emotion=emotion,
+        audio_config={"voice_ids": voice_ids} if voice_ids else None,
+        speaker_wav_path=speaker_wav_path,
+        tts_engine=tts_engine,
+    )
+    synth = _synth_for_engine(tts_engine or "qwen3")
+    out = storage.path_for_preview(user_id, book_id, role)
+    try:
+        synth.synthesize(request=req, output_path=out)
+        uri = storage.uri_for_preview(user_id, book_id, role)
+        return {"audio_uri": uri}
+    except Exception as e:
+        logger.warning("Preview %s failed: %s", role, e)
+        return {"error": str(e)}
+
+
+@app.post("/preview")
+def post_preview(body: dict | None = None):
+    """
+    POST /preview — синтез трёх превью по спикерам (narrator, male, female).
+    Тело: user_id, book_id, narrator: { text, speaker }, male: {...}, female: {...},
+    voice_ids?, speaker_settings? (tempo/pitch по ролям), tts_engine?.
+    Возвращает: { narrator: { audio_uri }, male: { audio_uri }, female: { audio_uri } }.
+    """
+    data = body or {}
+    user_id = (data.get("user_id") or "anonymous").strip()
+    book_id = data.get("book_id") or ""
+    if not book_id:
+        raise HTTPException(status_code=400, detail="book_id required")
+    voice_ids = data.get("voice_ids") or {}
+    if not isinstance(voice_ids, dict):
+        voice_ids = {}
+    speaker_settings = data.get("speaker_settings") or {}
+    if not isinstance(speaker_settings, dict):
+        speaker_settings = {}
+    tts_engine = (data.get("tts_engine") or "qwen3").strip().lower()
+
+    def emotion_for(role: str) -> dict:
+        s = speaker_settings.get(role)
+        if isinstance(s, dict):
+            return {"tempo": float(s.get("tempo", 1.0)), "pitch": float(s.get("pitch", 0.0))}
+        return {"tempo": 1.0, "pitch": 0.0}
+
+    result = {}
+    for role in ("narrator", "male", "female"):
+        item = data.get(role)
+        if not isinstance(item, dict):
+            result[role] = {"error": "missing text/speaker"}
+            continue
+        text = (item.get("text") or "").strip()
+        speaker = (item.get("speaker") or role).strip()
+        if not text:
+            result[role] = {"error": "empty text"}
+            continue
+        speaker_wav_path = item.get("speaker_wav_path") if isinstance(item.get("speaker_wav_path"), str) else None
+        result[role] = _preview_one(
+            user_id=user_id,
+            book_id=book_id,
+            role=role,
+            text=text,
+            speaker=speaker,
+            emotion=emotion_for(role),
+            voice_ids=voice_ids,
+            tts_engine=tts_engine,
+            speaker_wav_path=speaker_wav_path,
+        )
+    return result
 
 
 @app.post("/process-next")
@@ -221,6 +342,10 @@ def _process_batch_tasks(batch_size: int) -> bool:
     ]
     engine = (tasks[0].get("tts_engine") or "qwen3").strip().lower()
     synth = _synth_for_engine(engine)
+    logger.info(
+        "TTS engine: %s, book_id=%s, batch_size=%s",
+        engine, tasks[0].get("book_id"), len(tasks),
+    )
     try:
         batch_results = synth.synthesize_batch(reqs)
     except Exception:

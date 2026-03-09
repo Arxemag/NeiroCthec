@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,15 +10,22 @@ app = FastAPI(
     version="0.1.0"
 )
 
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+# CORS: в Docker приложение могут открывать по IP (например http://192.168.1.5:3000).
+# CORS_ORIGIN_REGEX переопределяет регулярку для origin (по умолчанию — localhost и любой хост).
+_cors_origin_regex = (
+    os.environ.get("CORS_ORIGIN_REGEX", "").strip()
+    or r"^https?://(localhost|127\.0\.0\.1|[\w.-]+)(:\d+)?$"
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origins=[],
+    allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

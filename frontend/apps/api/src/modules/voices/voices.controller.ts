@@ -1,10 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import type { Voice } from '@prisma/client';
 import { VoicesService } from './voices.service';
 import { AccessAuthGuard } from '../auth/guards';
 import { StorageService } from '../storage/storage.service';
 import { UpdateVoiceDto } from './dto';
 import type { Response } from 'express';
+import type { Request } from 'express';
 
 @Controller('/api/voices')
 export class VoicesController {
@@ -16,11 +17,37 @@ export class VoicesController {
   @UseGuards(AccessAuthGuard)
   @Get()
   async list(
-    @Query('language') language?: string, 
-    @Query('gender') gender?: string, 
+    @Req() req: Request & { user?: { sub?: string } },
+    @Query('language') language?: string,
+    @Query('gender') gender?: string,
     @Query('style') style?: string,
-    @Query('role') role?: string
+    @Query('role') role?: string,
   ) {
+    const coreBase = process.env.CORE_API_URL ?? process.env.APP_API_URL ?? '';
+    const userId = req.user?.sub;
+    if (coreBase && userId) {
+      try {
+        const coreList = await this.voices.listFromCore(userId);
+        if (coreList.length > 0) {
+          return {
+            voices: coreList.map((v) => ({
+              id: v.id,
+              name: v.name,
+              role: v.role === 'narrator' ? 'narrator' : 'actor',
+              gender: v.role === 'male' ? 'male' : v.role === 'female' ? 'female' : 'neutral',
+              language: 'ru',
+              style: '',
+              provider: 'core',
+              isActive: true,
+              hasSample: true,
+              characterDescription: null,
+            })),
+          };
+        }
+      } catch {
+        // fallback to DB
+      }
+    }
     const items = await this.voices.list({ language, gender, style, role });
     return {
       voices: items.map((v: Voice) => ({

@@ -79,6 +79,16 @@ def upload_book(
     user_id = (x_user_id or "").strip() or "anonymous"
     project_id = (x_project_id or "").strip() or None
     project_title = (project_title_form or x_project_title or "").strip() or None
+    # #region agent log
+    try:
+        import json
+        _log = {"sessionId": "9376b5", "hypothesisId": "upload-core", "location": "books.py:upload_book", "message": "Core upload_book entry", "data": {"user_id": user_id[:8], "project_id": (project_id or "")[:8] if project_id else None}, "timestamp": int(__import__("time").time() * 1000)}
+        _f = open("debug-9376b5.log", "a", encoding="utf-8")
+        _f.write(json.dumps(_log, ensure_ascii=False) + "\n")
+        _f.close()
+    except Exception:
+        pass
+    # #endregion
     filename = file.filename or "upload.txt"
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_BOOK_EXTENSIONS:
@@ -125,6 +135,16 @@ def upload_book(
         ChapterOut(chapter_id=1, title="Chapter 1")
     ]
 
+    # #region agent log
+    try:
+        import json
+        _log2 = {"sessionId": "9376b5", "hypothesisId": "upload-core", "location": "books.py:upload_book", "message": "Core upload_book success", "data": {"book_id": book_id, "project_id": (project_id or "")[:8] if project_id else None}, "timestamp": int(__import__("time").time() * 1000)}
+        _f2 = open("debug-9376b5.log", "a", encoding="utf-8")
+        _f2.write(json.dumps(_log2, ensure_ascii=False) + "\n")
+        _f2.close()
+    except Exception:
+        pass
+    # #endregion
     return BookUploadResponse(
         book_id=book_id,
         id=book_id,

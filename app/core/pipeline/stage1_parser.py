@@ -127,7 +127,9 @@ class StructuralParser:
             return False
         return len(text) > self._optimal_max
 
-    def _split_for_xtts(self, text: str, line_idx: int, is_dialogue: bool = False, chapter_id: int = 1) -> List[Line]:
+    def _split_for_xtts(
+        self, text: str, line_idx: int, is_dialogue: bool = False, chapter_id: int = 1, is_chapter_header: bool = False
+    ) -> List[Line]:
         """Разбивает текст на оптимальные сегменты для XTTS"""
         # 1. Сначала разбиваем на предложения
         sentences = self._split_into_sentences(text)
@@ -156,6 +158,7 @@ class StructuralParser:
                 full_original=text if i == 0 else None,
                 base_line_id=base_id,  # 🔥 Базовый ID для всех сегментов одной строки
                 chapter_id=chapter_id,
+                is_chapter_header=is_chapter_header and (i == 0),  # только первый сегмент
                 speaker=None,
                 emotion=None,
                 audio_path=None
@@ -305,7 +308,9 @@ class StructuralParser:
 
                 # Разбиваем как диалоги, так и повествование
                 if self.split_for_xtts and self._should_split_for_xtts(original):
-                    segment_lines = self._split_for_xtts(original, idx, is_dialogue, chapter_id=chapter_id)
+                    segment_lines = self._split_for_xtts(
+                        original, idx, is_dialogue, chapter_id=chapter_id, is_chapter_header=is_chapter_header
+                    )
                     parsed_lines.extend(segment_lines)
                 else:
                     # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная индексация
@@ -320,6 +325,7 @@ class StructuralParser:
                         full_original=None,
                         base_line_id=self._next_id,  # 🔥 Для несмегментированных строк base_id = id
                         chapter_id=chapter_id,
+                        is_chapter_header=is_chapter_header,
                         speaker=None,
                         emotion=None,
                         audio_path=None

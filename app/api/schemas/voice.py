@@ -7,3 +7,9 @@ class VoiceOut(BaseModel):
     name: str
     role: str  # narrator | male | female
     sample_url: str  # относительный путь, например /voices/{id}/sample
+
+
+class VoiceUploadResponse(BaseModel):
+    """Ответ после загрузки своего голоса."""
+    id: str  # voice_id (uuid)
+    name: str | None = None  # исходное имя файла

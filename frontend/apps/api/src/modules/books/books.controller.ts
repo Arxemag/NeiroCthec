@@ -15,7 +15,7 @@ import {
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor } from '../../lib/nestjs-platform-express';
 import type { Response } from 'express';
 // multer is a dependency of @nestjs/platform-express; use require to avoid missing types
 const multer = require('multer') as { memoryStorage: () => unknown };

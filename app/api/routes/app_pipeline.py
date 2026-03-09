@@ -12,8 +12,12 @@ import os
 import re
 import shutil
 import threading
-from collections import defaultdict, deque
 from pathlib import Path
+from urllib.parse import quote, unquote
+
+from collections import defaultdict, deque
+
+import requests
 
 _log = logging.getLogger(__name__)
 
@@ -25,8 +29,10 @@ from fastapi.responses import FileResponse
 
 from core.models import UserBookFormat, Line, EmotionProfile, Remark
 from core.pipeline.stage1_parser import StructuralParser
+from core.pipeline.tts_normalize import normalize_text_for_tts
 from core.voices import get_voice_path
 from core.pipeline.stage2_speaker import SpeakerResolver
+from core.pipeline.stage2_post_chunk import process as post_chunk_process
 from core.pipeline.stage3_emotion import EmotionResolver
 from core.pipeline.stage5_tts import Stage5Assembler
 
@@ -49,7 +55,6 @@ _lock = threading.Lock()
 _last_leased: dict | None = None
 # Для tts-complete-batch: список последних выданных задач
 _last_leased_batch: list[dict] | None = None
-
 
 def _book_dir(user_id: str, book_id: str) -> Path | None:
     base = STORAGE_ROOT / "books" / user_id
@@ -77,16 +82,17 @@ def _find_book_txt(book_dir: Path) -> Path | None:
     return None
 
 
-def _load_book_voice_config(book_dir: Path) -> tuple[dict[str, str], str | None]:
+def _load_book_voice_config(book_dir: Path) -> tuple[dict[str, str], str | None, dict]:
     """
-    Читает сохранённые voice_ids и tts_engine книги.
-    Возвращает (voice_ids, tts_engine). voice_ids для переиспользования строк, tts_engine — чтобы при смене движка переозвучить.
+    Читает сохранённые voice_ids, tts_engine и speaker_settings книги.
+    Возвращает (voice_ids, tts_engine, speaker_settings). speaker_settings: { narrator|male|female: { tempo, pitch } }.
     """
     path = book_dir / _BOOK_CONFIG_FILENAME
     voice_ids: dict[str, str] = {}
     tts_engine: str | None = None
+    speaker_settings: dict = {}
     if not path.exists():
-        return (voice_ids, tts_engine)
+        return (voice_ids, tts_engine, speaker_settings)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -96,24 +102,39 @@ def _load_book_voice_config(book_dir: Path) -> tuple[dict[str, str], str | None]
             tts_engine = data.get("tts_engine")
             if not isinstance(tts_engine, str):
                 tts_engine = None
+            ss = data.get("speaker_settings")
+            if isinstance(ss, dict):
+                speaker_settings = {
+                    k: {"tempo": float(ss[k].get("tempo", 1.0)), "pitch": float(ss[k].get("pitch", 0.0))}
+                    for k in ("narrator", "male", "female")
+                    if isinstance(ss.get(k), dict)
+                }
     except Exception:
         pass
-    return (voice_ids, tts_engine)
+    return (voice_ids, tts_engine, speaker_settings)
 
 
-def _save_book_voice_config(book_dir: Path, voice_ids: dict[str, str], tts_engine: str | None = None) -> None:
-    """Сохраняет voice_ids и tts_engine книги для сравнения при следующем запуске."""
+def _save_book_voice_config(
+    book_dir: Path,
+    voice_ids: dict[str, str],
+    tts_engine: str | None = None,
+    speaker_settings: dict | None = None,
+) -> None:
+    """Сохраняет voice_ids, tts_engine и speaker_settings книги."""
     book_dir.mkdir(parents=True, exist_ok=True)
     path = book_dir / _BOOK_CONFIG_FILENAME
     payload: dict = {"voice_ids": voice_ids}
     if tts_engine:
         payload["tts_engine"] = tts_engine
+    if speaker_settings is not None:
+        payload["speaker_settings"] = speaker_settings
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=0), encoding="utf-8")
 
 
 def _save_processed_text_with_roles(book_dir: Path, ubf: UserBookFormat) -> None:
     """
     Сохраняет обработанный текст с назначенными ролями в processed/text_with_roles.txt.
+    Используется текст для TTS (text_for_tts), если задан — так в storage лежит уже отредактированный вариант.
     Формат: [ROLE] текст строки
     """
     processed_dir = book_dir / "processed"
@@ -122,7 +143,7 @@ def _save_processed_text_with_roles(book_dir: Path, ubf: UserBookFormat) -> None
 
     lines_output = []
     for line in sorted(ubf.lines, key=lambda l: l.idx):
-        text = (line.original or "").strip()
+        text = (getattr(line, "text_for_tts", None) or line.original or "").strip()
         if not text:
             continue
         role = line.speaker or "narrator"
@@ -141,6 +162,17 @@ def _emotion_to_dict(emotion: EmotionProfile | None) -> dict:
         "pitch": emotion.pitch,
         "pause_before": emotion.pause_before,
         "pause_after": emotion.pause_after,
+    }
+
+
+def _speaker_settings_to_emotion(speaker_settings: dict, role: str) -> dict:
+    """В TTS передаём только tempo и pitch из speaker_settings[role]. Остальное — дефолты/игнор."""
+    s = (speaker_settings or {}).get(role) if isinstance(speaker_settings, dict) else None
+    if not isinstance(s, dict):
+        return {"tempo": 1.0, "pitch": 0.0}
+    return {
+        "tempo": float(s.get("tempo", 1.0)),
+        "pitch": float(s.get("pitch", 0.0)),
     }
 
 
@@ -166,11 +198,12 @@ def _build_ubf_from_state(lines_data: list, done: dict) -> UserBookFormat:
         line_objs.append(
             Line(
                 idx=line_id,
-                type="narrator",
+                type=t.get("type") or "narrator",
                 original=t.get("text", ""),
                 remarks=[],
                 is_segment=False,
                 chapter_id=t.get("chapter_id"),
+                is_chapter_header=bool(t.get("is_chapter_header")),
                 speaker=t.get("voice"),
                 emotion=emotion,
                 audio_path=audio_path,
@@ -249,6 +282,16 @@ def list_books(
     user_id = (x_user_id or "").strip() or "anonymous"
     # Без project_id не возвращаем книги — иначе показывались бы книги всех проектов
     pid = (project_id or "").strip()
+    # #region agent log
+    try:
+        import json
+        _log = {"sessionId": "9376b5", "hypothesisId": "listbooks-core", "location": "app_pipeline.py:list_books", "message": "Core list_books entry", "data": {"user_id": user_id[:8], "project_id": (pid or "")[:8] if pid else None}, "timestamp": int(__import__("time").time() * 1000)}
+        _f = open("debug-9376b5.log", "a", encoding="utf-8")
+        _f.write(json.dumps(_log, ensure_ascii=False) + "\n")
+        _f.close()
+    except Exception:
+        pass
+    # #endregion
     if not pid:
         return []
     base = STORAGE_ROOT / "books" / user_id
@@ -295,6 +338,16 @@ def list_books(
             "created_at": "",
             "final_audio_path": final_audio_path,
         })
+    # #region agent log
+    try:
+        import json
+        _log2 = {"sessionId": "9376b5", "hypothesisId": "listbooks-core", "location": "app_pipeline.py:list_books", "message": "Core list_books result", "data": {"count": len(result), "user_id": user_id[:8], "project_id": (pid or "")[:8] if pid else None}, "timestamp": int(__import__("time").time() * 1000)}
+        _f2 = open("debug-9376b5.log", "a", encoding="utf-8")
+        _f2.write(json.dumps(_log2, ensure_ascii=False) + "\n")
+        _f2.close()
+    except Exception:
+        pass
+    # #endregion
     return result
 
 
@@ -452,6 +505,137 @@ internal_router = APIRouter()
 AUDIOBOOKS_ROOT = STORAGE_ROOT / "audiobooks"
 
 
+def _stage4_preview_url() -> str:
+    """Base URL stage4 для вызова /preview (env APP_STAGE4_URL или STAGE4_URL)."""
+    return (os.environ.get("APP_STAGE4_URL") or os.environ.get("STAGE4_URL") or "http://localhost:8001").strip().rstrip("/")
+
+
+@internal_router.post("/preview-by-speakers")
+def post_preview_by_speakers(
+    body: dict = Body(default_factory=dict),
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+):
+    """
+    POST /internal/preview-by-speakers — превью по спикерам (3 фрагмента: narrator, male, female).
+    Запускает Stage1 + Stage2 + постобработку по 100 символам, выбирает по одной реплике narrator, male, female
+    (первые по порядку), вызывает TTS (stage4), возвращает три аудио URI.
+    Тело: book_id, voice_ids?, speaker_settings? (tempo, pitch по ролям), tts_engine?.
+    Ответ: { narrator: { audio_uri }, male: { audio_uri }, female: { audio_uri } } (или { error } при сбое).
+    """
+    user_id = (x_user_id or "").strip() or (body or {}).get("user_id") or "anonymous"
+    book_id = (body or {}).get("book_id")
+    if not book_id:
+        raise HTTPException(status_code=400, detail="book_id is required")
+    book_dir = _book_dir(user_id, book_id)
+    if not book_dir:
+        raise HTTPException(status_code=404, detail="Book not found")
+    txt_path = _find_book_txt(book_dir)
+    if not txt_path:
+        raise HTTPException(status_code=404, detail="No .txt file in book original/")
+
+    try:
+        parser = StructuralParser(split_for_xtts=True)
+        ubf = parser.parse_file(txt_path)
+        SpeakerResolver().process(ubf)
+        post_chunk_process(ubf)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pipeline stage1+post_chunk failed: {e!s}") from e
+
+    # Первые по порядку реплики narrator, male, female
+    picked = {}
+    for line in sorted(ubf.lines, key=lambda l: l.idx):
+        role = line.speaker or "narrator"
+        if role not in picked and (line.original or "").strip():
+            picked[role] = line
+        if len(picked) >= 3:
+            break
+    for role in ("narrator", "male", "female"):
+        if role not in picked:
+            picked[role] = None
+
+    config = _audio_settings.get("config") or {}
+    voice_ids = (body or {}).get("voice_ids") or config.get("voice_ids") or {}
+    if not isinstance(voice_ids, dict):
+        voice_ids = {}
+    effective_voice_ids = {r: str(voice_ids[r]) for r in ("narrator", "male", "female") if voice_ids.get(r)}
+    speaker_settings = (body or {}).get("speaker_settings")
+    if not isinstance(speaker_settings, dict):
+        _, _, prev_ss = _load_book_voice_config(book_dir)
+        speaker_settings = prev_ss or {r: {"tempo": 1.0, "pitch": 0.0} for r in ("narrator", "male", "female")}
+    tts_engine = (body or {}).get("tts_engine") or config.get("tts_engine") or "qwen3"
+
+    payload = {
+        "user_id": user_id,
+        "book_id": book_id,
+        "voice_ids": effective_voice_ids,
+        "speaker_settings": speaker_settings,
+        "tts_engine": tts_engine,
+    }
+    for role in ("narrator", "male", "female"):
+        line = picked.get(role)
+        if line and (line.original or "").strip():
+            voice = effective_voice_ids.get(role) or role
+            raw = (line.original or "").strip()[:500]
+            text_for_payload = (getattr(line, "text_for_tts", None) or "").strip()[:500]
+            payload[role] = {
+                "text": text_for_payload if text_for_payload else normalize_text_for_tts(raw),
+                "speaker": voice,
+                "speaker_wav_path": get_voice_path(voice, user_id=user_id),
+            }
+        else:
+            payload[role] = {"text": " ", "speaker": role}
+
+    try:
+        r = requests.post(f"{_stage4_preview_url()}/preview", json=payload, timeout=120)
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as e:
+        resp = getattr(e, "response", None)
+        body_preview = (resp.text[:500] if resp and getattr(resp, "text", None) else None) or ""
+        _log.warning(
+            "stage4 preview request failed: %s; status=%s body=%s",
+            e, getattr(resp, "status_code", None), body_preview,
+        )
+        raise HTTPException(status_code=502, detail=f"Stage4 preview failed: {e!s}") from e
+
+    # Сплющиваем в URL для клиента: narrator/male/female -> "/internal/storage?path=books/..."
+    result = {}
+    warnings = []
+    for role in ("narrator", "male", "female"):
+        item = data.get(role)
+        if isinstance(item, dict) and item.get("audio_uri") and "error" not in item:
+            result[role] = f"/internal/storage?path={quote(item['audio_uri'])}"
+        elif isinstance(item, dict) and item.get("error"):
+            err_msg = item["error"]
+            _log.warning("preview %s error: %s", role, err_msg)
+            warnings.append(f"{role}: {err_msg}")
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+@internal_router.get("/storage")
+def get_internal_storage(path: str = ""):
+    """
+    GET /internal/storage?path=books/user_id/book_id/preview_narrator.wav — отдать файл из STORAGE_ROOT.
+    Нужно для проигрывания превью в браузере при доступе через proxy.
+    """
+    raw = (path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="path is required")
+    rel = unquote(raw)
+    if ".." in rel or rel.startswith("/") or "\\" in rel:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    full = STORAGE_ROOT / rel
+    if not full.is_file() or not str(full.resolve()).startswith(str(STORAGE_ROOT.resolve())):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(
+        full,
+        media_type="audio/wav" if rel.endswith(".wav") else "application/octet-stream",
+        filename=full.name,
+    )
+
+
 def _sanitize_folder_name(name: str) -> str:
     """Имя папки без недопустимых символов; пробелы в подчёркивания."""
     s = (name or "").strip() or "book"
@@ -536,18 +720,181 @@ def get_audiobook_stream(
     )
 
 
+def _process_book_stage4_post_stage3(
+    user_id: str,
+    book_id: str,
+    body: dict,
+    book_dir: Path,
+    ubf: UserBookFormat,
+    voice_ids: dict,
+    tts_engine: str,
+    max_tasks: int,
+) -> dict:
+    """Выполняет нормализацию, сохранение, сбор lines_data и постановку в очередь. Вызывается из потока."""
+    # Нормализация text_for_tts
+    _log.info("process-book-stage4: post-Stage3 step 1 — normalizing text_for_tts")
+    for line in ubf.lines:
+        if not getattr(line, "text_for_tts", None) and (line.original or "").strip():
+            line.text_for_tts = normalize_text_for_tts((line.original or "").strip())
+    _log.info("process-book-stage4: post-Stage3 step 2 — saving text_with_roles")
+    _save_processed_text_with_roles(book_dir, ubf)
+
+    prev_voice_ids_cfg, prev_tts_engine, prev_speaker_settings = _load_book_voice_config(book_dir)
+    body_ss = (body or {}).get("speaker_settings")
+    if isinstance(body_ss, dict):
+        speaker_settings = {}
+        for r in ("narrator", "male", "female"):
+            x = body_ss.get(r)
+            speaker_settings[r] = (
+                {"tempo": float(x.get("tempo", 1.0)), "pitch": float(x.get("pitch", 0.0))}
+                if isinstance(x, dict) else {"tempo": 1.0, "pitch": 0.0}
+            )
+    else:
+        speaker_settings = prev_speaker_settings or {r: {"tempo": 1.0, "pitch": 0.0} for r in ("narrator", "male", "female")}
+
+    lines_data = []
+    config_voice_ids = (_audio_settings.get("config") or {}).get("voice_ids") or {}
+    effective_voice_ids = {}
+    for role in ("narrator", "male", "female"):
+        if isinstance(voice_ids, dict) and voice_ids.get(role):
+            effective_voice_ids[role] = str(voice_ids[role])
+        elif isinstance(config_voice_ids, dict) and config_voice_ids.get(role):
+            effective_voice_ids[role] = str(config_voice_ids[role])
+    effective_voice_ids = dict(effective_voice_ids)
+    _log.info("process-book-stage4: effective_voice_ids=%s max_tasks=%s", effective_voice_ids, max_tasks)
+
+    skipped_empty = 0
+    skipped_empty_text = 0
+    sorted_lines = sorted(ubf.lines, key=lambda l: l.idx)
+    sample_orig_lens = [(l.idx, len((l.original or "").strip()), bool((l.original or "").strip())) for l in sorted_lines[:3]]
+    _log.info("process-book-stage4: building lines_data ubf.lines=%s sample_orig_len=%s", len(ubf.lines), sample_orig_lens)
+    for line in sorted_lines:
+        if len(lines_data) >= max_tasks:
+            break
+        if not (line.original or "").strip():
+            skipped_empty += 1
+            continue
+        text_for_task = (
+            line.text_for_tts if getattr(line, "text_for_tts", None)
+            else normalize_text_for_tts((line.original or "").strip())
+        )
+        if not (text_for_task or "").strip():
+            skipped_empty_text += 1
+            continue
+        role = line.speaker or "narrator"
+        voice_for_tts = effective_voice_ids.get(role) or role
+        speaker_wav_path = get_voice_path(voice_for_tts, user_id=user_id)
+        emotion_for_tts = _speaker_settings_to_emotion(speaker_settings, role)
+        lines_data.append({
+            "line_id": line.idx,
+            "text": (text_for_task or "").strip(),
+            "voice": voice_for_tts,
+            "role": role,
+            "emotion": emotion_for_tts,
+            "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
+            "chapter_id": (line.chapter_id if line.chapter_id is not None else 1),
+            "tts_engine": tts_engine,
+            "speaker_wav_path": speaker_wav_path,
+            "is_chapter_header": getattr(line, "is_chapter_header", False),
+            "type": line.type or "narrator",
+        })
+
+    _log.info(
+        "process-book-stage4: ubf.lines=%s lines_data=%s skipped_empty=%s skipped_empty_text=%s",
+        len(ubf.lines), len(lines_data), skipped_empty, skipped_empty_text,
+    )
+
+    force_re_synthesize = (body or {}).get("force") is True
+    lines_dir = book_dir / "lines"
+    lines_dir.mkdir(parents=True, exist_ok=True)
+    prev_voice_ids = prev_voice_ids_cfg or {}
+    tts_engine_unchanged = (prev_tts_engine or "qwen3") == tts_engine
+    done: dict[int, str] = {}
+    pending_ids: list[int] = []
+    for t in lines_data:
+        line_id = t["line_id"]
+        role = t.get("role", "narrator")
+        existing_path = lines_dir / f"line_{line_id}.wav"
+        voice_unchanged = prev_voice_ids.get(role) == effective_voice_ids.get(role)
+        reuse = not force_re_synthesize and existing_path.exists() and voice_unchanged and tts_engine_unchanged
+        if reuse:
+            done[line_id] = str(existing_path)
+        else:
+            if existing_path.exists():
+                try:
+                    existing_path.unlink()
+                except OSError:
+                    pass
+            pending_ids.append(line_id)
+    pending = deque(pending_ids)
+    _log.info("process-book-stage4: reuse check done → done=%s pending=%s", len(done), len(pending_ids))
+    _save_book_voice_config(book_dir, effective_voice_ids, tts_engine, speaker_settings)
+    if pending:
+        final_wav = book_dir / "final.wav"
+        if final_wav.exists():
+            try:
+                final_wav.unlink()
+            except OSError:
+                pass
+
+    key = (user_id, book_id)
+    _log.info("process-book-stage4: before lock key=%s pending_len=%s will_enqueue=%s", key, len(pending), bool(pending))
+    with _lock:
+        _book_states[key] = {
+            "lines": lines_data,
+            "pending": pending,
+            "done": done,
+            "stop_requested": False,
+            "voice_ids": effective_voice_ids,
+            "tts_engine": tts_engine,
+        }
+        enqueued = False
+        if pending:
+            try:
+                _pending_books.remove(key)
+            except ValueError:
+                pass
+            _pending_books.append(key)
+            enqueued = True
+        _pending_books_len = len(_pending_books)
+    _log.info("process-book-stage4: after lock enqueued=%s queue_len=%s", enqueued, _pending_books_len)
+
+    final_path = None
+    if not pending and done:
+        final_path = _assemble_final_audio(user_id, book_id)
+    remaining = len(pending)
+    _log.info(
+        "process-book-stage4 outcome: book_id=%s pending=%s done=%s enqueued=%s queue_len=%s",
+        book_id, remaining, len(done), enqueued, _pending_books_len,
+    )
+    return {
+        "book_id": book_id,
+        "processed_tasks": len(done),
+        "remaining_tasks": remaining,
+        "book_status": "done" if (not pending and done) else "processing",
+        "final_audio_path": str(final_path) if final_path else None,
+        "stopped": False,
+        "all_lines_done": bool(remaining == 0 and done),
+    }
+
+
 @internal_router.post("/process-book-stage4")
 def post_process_book_stage4(
     body: dict = Body(default_factory=dict),
     x_user_id: str | None = Header(None, alias="X-User-Id"),
 ):
     """
-    POST /internal/process-book-stage4 — запуск пайплайна: stage1 (парсер), stage2 (спикеры), stage3 (эмоции),
-    формирование очереди задач для stage4 (TTS). Воркер забирает задачи через /internal/tts-next.
+    POST /internal/process-book-stage4 — запуск пайплайна: stage1–3, формирование очереди для stage4 (TTS).
+    Body: book_id, max_tasks?, voice_ids?, tts_engine?, speaker_settings?, force? (true = все строки в pending).
+    В логах: «process-book-stage4 outcome: … pending=… enqueued=…» — по нему видно, ушло ли в stage4.
     """
     user_id = (x_user_id or "").strip() or "anonymous"
     book_id = (body or {}).get("book_id")
-    _log.info("process-book-stage4 request book_id=%s user_id=%s", book_id, user_id)
+    body_tts_engine = (body or {}).get("tts_engine")
+    _log.info(
+        "process-book-stage4 request book_id=%s user_id=%s body.tts_engine=%s",
+        book_id, user_id, body_tts_engine,
+    )
     if not book_id:
         raise HTTPException(status_code=400, detail="book_id is required")
     max_tasks = int((body or {}).get("max_tasks", 500))
@@ -560,143 +907,67 @@ def post_process_book_stage4(
     tts_engine = (body or {}).get("tts_engine") or config.get("tts_engine") or "qwen3"
     if tts_engine not in ("qwen3", "xtts2"):
         tts_engine = "qwen3"
-
     book_dir = _book_dir(user_id, book_id)
     if not book_dir:
         raise HTTPException(status_code=404, detail="Book not found")
     txt_path = _find_book_txt(book_dir)
     if not txt_path:
         raise HTTPException(status_code=404, detail="No .txt file in book original/")
+    _log.info("process-book-stage4: book_dir=%s txt_path=%s", book_dir, txt_path)
 
     try:
         parser = StructuralParser(split_for_xtts=True)
         ubf = parser.parse_file(txt_path)
+        _log.info("process-book-stage4: Stage1 done ubf.lines=%s", len(ubf.lines))
         SpeakerResolver().process(ubf)
+        post_chunk_process(ubf)  # группировка по спикеру/chapter_id, резание ~100 символов
+        _log.info("process-book-stage4: Stage2+post_chunk done ubf.lines=%s", len(ubf.lines))
         EmotionResolver().process(ubf)
+        _log.info("process-book-stage4: Stage3 done ubf.lines=%s", len(ubf.lines))
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Pipeline stage1-3 failed: {e!s}",
         ) from e
 
-    # Сохраняем обработанный текст с ролями в processed/text_with_roles.txt
-    _save_processed_text_with_roles(book_dir, ubf)
+    # Формирование очереди в фоновом потоке: при обрыве соединения клиентом поток всё равно завершит работу.
+    result_ref: list[dict | None] = [None]
+    err_ref: list[BaseException | None] = [None]
 
-    # Собираем задачи (до max_tasks строк)
-    lines_data = []
-    # Мержим с настройками из /books/settings/audio
-    config_voice_ids = (_audio_settings.get("config") or {}).get("voice_ids") or {}
-    effective_voice_ids: dict[str, str] = {}
-    for role in ("narrator", "male", "female"):
-        if isinstance(voice_ids, dict) and voice_ids.get(role):
-            effective_voice_ids[role] = str(voice_ids[role])
-        elif isinstance(config_voice_ids, dict) and config_voice_ids.get(role):
-            effective_voice_ids[role] = str(config_voice_ids[role])
+    def run_post_stage3() -> None:
+        try:
+            result_ref[0] = _process_book_stage4_post_stage3(
+                user_id=user_id,
+                book_id=book_id,
+                body=body or {},
+                book_dir=book_dir,
+                ubf=ubf,
+                voice_ids=voice_ids,
+                tts_engine=tts_engine,
+                max_tasks=max_tasks,
+            )
+        except BaseException as e:
+            err_ref[0] = e
+            _log.exception("process-book-stage4: post-Stage3 thread failed: %s", e)
 
-    for line in sorted(ubf.lines, key=lambda l: l.idx):
-        if len(lines_data) >= max_tasks:
-            break
-        if not (line.original or "").strip():
-            continue
-        # Определяем роль для строки и подставляем выбранный пользователем голос.
-        role = line.speaker or "narrator"
-        voice_override = effective_voice_ids.get(role)
-        # Если для роли выбран конкретный voiceId, передаём его как speaker в TTS;
-        # иначе оставляем роль (narrator/male/female), и движок возьмёт дефолтный голос.
-        voice_for_tts = voice_override or role
-        speaker_wav_path = get_voice_path(voice_for_tts)
-        lines_data.append({
-            "line_id": line.idx,
-            "text": line.original.strip(),
-            "voice": voice_for_tts,
-            "role": role,
-            "emotion": _emotion_to_dict(line.emotion),
-            "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
-            "chapter_id": (line.chapter_id if line.chapter_id is not None else 1),
-            "tts_engine": tts_engine,
-            "speaker_wav_path": speaker_wav_path,
-        })
+    thread = threading.Thread(target=run_post_stage3, daemon=False)
+    thread.start()
+    thread.join(timeout=300.0)
 
-    # Переиспользование уже озвученных строк: если line_{id}.wav есть, голоса и движок TTS не менялись — в done, иначе в pending.
-    lines_dir = book_dir / "lines"
-    lines_dir.mkdir(parents=True, exist_ok=True)
-    prev_voice_ids, prev_tts_engine = _load_book_voice_config(book_dir)
-    prev_voice_ids = prev_voice_ids or {}
-    tts_engine_unchanged = (prev_tts_engine or "qwen3") == tts_engine
-    done: dict[int, str] = {}
-    pending_ids: list[int] = []
-    for t in lines_data:
-        line_id = t["line_id"]
-        role = t.get("role", "narrator")
-        existing_path = lines_dir / f"line_{line_id}.wav"
-        voice_unchanged = prev_voice_ids.get(role) == effective_voice_ids.get(role)
-        if existing_path.exists() and voice_unchanged and tts_engine_unchanged:
-            done[line_id] = str(existing_path)
-        else:
-            # Голос роли изменился или файла не было — переозвучиваем. Удаляем старый файл, чтобы не использовать его.
-            if existing_path.exists():
-                try:
-                    existing_path.unlink()
-                except OSError:
-                    pass
-            pending_ids.append(line_id)
-    pending = deque(pending_ids)
-    _save_book_voice_config(book_dir, effective_voice_ids, tts_engine)
-    # Чтобы при смене голосов не отдавать старый final.wav, удаляем его при наличии pending.
-    if pending:
-        final_wav = book_dir / "final.wav"
-        if final_wav.exists():
-            try:
-                final_wav.unlink()
-            except OSError:
-                pass
-
-    key = (user_id, book_id)
-    with _lock:
-        _book_states[key] = {
-            "lines": lines_data,
-            "pending": pending,
-            "done": done,
-            "stop_requested": False,
-            "voice_ids": effective_voice_ids,
-            "tts_engine": tts_engine,
-        }
-        # Если есть pending — книга всегда должна быть в очереди (убираем старый ключ, добавляем один раз)
-        enqueued = False
-        if pending:
-            try:
-                _pending_books.remove(key)
-            except ValueError:
-                pass
-            _pending_books.append(key)
-            enqueued = True
-
-    # Если все строки переиспользованы (ничего в pending) — сразу собираем финальный WAV.
-    final_path = None
-    if not pending and done:
-        final_path = _assemble_final_audio(user_id, book_id)
-
-    remaining = len(pending)
-    if remaining == 0 and done:
-        _log.info(
-            "process-book-stage4: book_id=%s remaining_tasks=0 (all %s lines already done, nothing enqueued for stage4). "
-            "To re-synthesize, switch tts_engine (e.g. to XTTS2), change voices, or remove books/%s/%s/lines/*.wav",
-            book_id, len(done), user_id, book_id,
-        )
-    else:
-        _log.info(
-            "process-book-stage4: book_id=%s remaining_tasks=%s enqueued=%s tts_engine=%s (stage4 will poll tts-next)",
-            book_id, remaining, enqueued if remaining else False, tts_engine,
-        )
-
+    if err_ref[0]:
+        raise HTTPException(status_code=500, detail=f"Post-Stage3 failed: {err_ref[0]!s}") from err_ref[0]
+    if result_ref[0] is not None:
+        return result_ref[0]
+    # Таймаут или обрыв — очередь могла уже заполниться в потоке
+    _log.warning("process-book-stage4: post-Stage3 thread did not finish in time or client disconnected")
     return {
         "book_id": book_id,
-        "processed_tasks": len(done),
-        "remaining_tasks": remaining,
-        "book_status": "done" if (not pending and done) else "processing",
-        "final_audio_path": str(final_path) if final_path else None,
+        "processed_tasks": 0,
+        "remaining_tasks": -1,
+        "book_status": "processing",
+        "final_audio_path": None,
         "stopped": False,
-        "all_lines_done": bool(remaining == 0 and done),
+        "all_lines_done": False,
     }
 
 
@@ -744,7 +1015,10 @@ def post_tts_next():
                 result.get("book_id"), result.get("line_id"), result.get("tts_engine", "qwen3"),
             )
             return result
-    _log.info("tts-next: queue empty (no pending books/tasks), returning 404")
+    _log.info(
+        "tts-next: queue empty (no pending books/tasks), returning 404. queue_len=%s keys=%s",
+        len(_pending_books), list(_pending_books)[:5],
+    )
     raise HTTPException(status_code=404, detail="No pending tasks")
 
 
@@ -795,6 +1069,10 @@ def post_tts_next_batch(count: int = 3):
             tasks.append(task_data)
     if not tasks:
         raise HTTPException(status_code=404, detail="No pending tasks")
+    _log.info(
+        "tts-next-batch: issued %s tasks book_id=%s tts_engine=%s",
+        len(tasks), tasks[0].get("book_id"), tasks[0].get("tts_engine", "qwen3"),
+    )
     _last_leased_batch = [{"user_id": t["user_id"], "book_id": t["book_id"], "line_id": t["line_id"]} for t in tasks]
     return {"tasks": tasks}
 

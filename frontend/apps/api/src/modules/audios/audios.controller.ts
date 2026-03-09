@@ -1,5 +1,4 @@
 import { Controller, Get, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
-import type { Audio } from '@prisma/client';
 import { AccessAuthGuard } from '../auth/guards';
 import { AudiosService } from './audios.service';
 import { StorageService } from '../storage/storage.service';
@@ -33,7 +32,7 @@ export class AudiosController {
   async list(@Req() req: any, @Param('id') projectId: string) {
     const { audios } = await this.audios.listByProject(projectId, req.user.sub);
     return {
-      audios: audios.map((a: Audio) => ({
+      audios: audios.map((a) => ({
         id: a.id,
         status: a.status,
         format: a.format,

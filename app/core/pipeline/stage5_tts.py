@@ -72,6 +72,12 @@ class Stage5Assembler:
                 # Добавляем аудио
                 audio_chunks.append(audio)
 
+                # После заголовка главы — пауза 3 секунды (независимо от прочих пауз)
+                if getattr(line, "is_chapter_header", False):
+                    chapter_pause_samples = 3 * self.SAMPLE_RATE
+                    chapter_pause = np.zeros(chapter_pause_samples, dtype=np.float32)
+                    audio_chunks.append(chapter_pause)
+
                 # Добавляем паузу (кроме последнего)
                 if i < len(sorted_lines):
                     pause_samples = self._calculate_pause_samples(line)
