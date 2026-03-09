@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(name)s: %(message)s",
+)
 import tempfile
 import threading
 import time
@@ -8,6 +14,8 @@ from pathlib import Path
 
 import requests
 from fastapi import FastAPI, HTTPException
+
+logger = logging.getLogger("stage4")
 
 from stage4_service.schemas import TTSRequest, TTSResponse, TTSStatus
 from stage4_service.storage import LocalObjectStorage
@@ -44,6 +52,8 @@ def _synth_for_engine(tts_engine: str | None):
 storage = LocalObjectStorage()
 # Без пробелов и без завершающего слэша, иначе получится /internal%20/tts-next и 404
 core_internal_url = (os.getenv("CORE_INTERNAL_URL", "http://api:8000/internal") or "").strip().rstrip("/")
+# Счётчик опросов с пустой очередью — раз в ~30 сек пишем в лог, что воркер жив и опрашивает core
+_empty_poll_count = 0
 
 
 @app.get("/health")
@@ -53,7 +63,10 @@ def health():
 
 @app.post("/tts", response_model=TTSResponse)
 def tts(request: TTSRequest):
-    synth = _synth_for_engine(getattr(request, "tts_engine", None))
+    engine = (getattr(request, "tts_engine", None) or "qwen3").strip().lower()
+    synth = _synth_for_engine(engine)
+    url = getattr(synth, "base_url", None) or "(mock)"
+    logger.info("tts task book_id=%s line_id=%s engine=%s url=%s", request.book_id, request.line_id, engine, url)
     try:
         relative = Path(request.user_id) / request.book_id / f"line_{request.line_id}.wav"
         tmp_path = Path(tempfile.gettempdir()) / relative
@@ -110,13 +123,19 @@ def _process_one_task() -> bool:
     batch_size = int(os.getenv("STAGE4_BATCH_SIZE", "1"))
     if batch_size > 1:
         return _process_batch_tasks(batch_size)
+    global _empty_poll_count
     try:
         lease = requests.post(f"{core_internal_url}/tts-next", timeout=20)
         if lease.status_code == 404:
+            _empty_poll_count += 1
+            if _empty_poll_count % 30 == 1:
+                logger.info("tts-next empty (stage4 polling %s, queue empty)", core_internal_url)
             return False
+        _empty_poll_count = 0
         lease.raise_for_status()
         task = lease.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("tts-next request failed: %s", e)
         return False
     req = TTSRequest(
         task_id=task["task_id"],
@@ -131,7 +150,26 @@ def _process_one_task() -> bool:
         tts_engine=task.get("tts_engine", "qwen3"),
     )
     result = tts(req)
+    # При 503 (модель ещё грузится) повторяем запрос несколько раз с паузой
+    retry_on_503 = int(os.getenv("STAGE4_TTS_503_RETRIES", "5"))
+    retry_delay_sec = int(os.getenv("STAGE4_TTS_503_RETRY_DELAY_SEC", "20"))
+    for attempt in range(retry_on_503 - 1):
+        if result.status == TTSStatus.DONE:
+            break
+        err = result.error or ""
+        if "503" not in err and "Service Unavailable" not in err:
+            break
+        logger.info(
+            "TTS 503 (model loading?), retry in %ss (%s/%s) book_id=%s line_id=%s",
+            retry_delay_sec, attempt + 1, retry_on_503 - 1, req.book_id, req.line_id,
+        )
+        time.sleep(retry_delay_sec)
+        result = tts(req)
     if result.status != TTSStatus.DONE:
+        logger.error(
+            "TTS failed book_id=%s line_id=%s engine=%s: %s",
+            req.book_id, req.line_id, getattr(req, "tts_engine", "qwen3"), result.error or "unknown",
+        )
         return True  # уже забрали задачу, но не смогли — не повторяем бесконечно
     try:
         requests.post(

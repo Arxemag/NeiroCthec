@@ -101,6 +101,8 @@ export type AppProcessBookStage4Response = {
   book_status: string;
   final_audio_path: string | null;
   stopped: boolean;
+  /** true, если все строки уже озвучены и в очередь ничего не добавлено */
+  all_lines_done?: boolean;
 };
 
 /** POST /books/upload — загрузка файла .txt, .fb2, .epub, .mobi */

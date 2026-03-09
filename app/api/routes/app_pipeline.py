@@ -7,12 +7,15 @@ stage4 worker дергает /internal/tts-next и /internal/tts-complete.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import threading
 from collections import defaultdict, deque
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 # Имя файла с последними voice_ids по книге (для переиспользования уже озвученных строк)
 _BOOK_CONFIG_FILENAME = "config.json"
@@ -74,26 +77,38 @@ def _find_book_txt(book_dir: Path) -> Path | None:
     return None
 
 
-def _load_book_voice_config(book_dir: Path) -> dict[str, str] | None:
-    """Читает сохранённые voice_ids книги (narrator/male/female). Нужно для переиспользования строк при повторном запуске."""
+def _load_book_voice_config(book_dir: Path) -> tuple[dict[str, str], str | None]:
+    """
+    Читает сохранённые voice_ids и tts_engine книги.
+    Возвращает (voice_ids, tts_engine). voice_ids для переиспользования строк, tts_engine — чтобы при смене движка переозвучить.
+    """
     path = book_dir / _BOOK_CONFIG_FILENAME
+    voice_ids: dict[str, str] = {}
+    tts_engine: str | None = None
     if not path.exists():
-        return None
+        return (voice_ids, tts_engine)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        v = data.get("voice_ids") if isinstance(data, dict) else None
-        if isinstance(v, dict):
-            return {k: str(v[k]) for k in ("narrator", "male", "female") if v.get(k)}
+        if isinstance(data, dict):
+            v = data.get("voice_ids")
+            if isinstance(v, dict):
+                voice_ids = {k: str(v[k]) for k in ("narrator", "male", "female") if v.get(k)}
+            tts_engine = data.get("tts_engine")
+            if not isinstance(tts_engine, str):
+                tts_engine = None
     except Exception:
         pass
-    return None
+    return (voice_ids, tts_engine)
 
 
-def _save_book_voice_config(book_dir: Path, voice_ids: dict[str, str]) -> None:
-    """Сохраняет voice_ids книги, чтобы при следующем запуске сравнивать и не переозвучивать строки с той же ролью."""
+def _save_book_voice_config(book_dir: Path, voice_ids: dict[str, str], tts_engine: str | None = None) -> None:
+    """Сохраняет voice_ids и tts_engine книги для сравнения при следующем запуске."""
     book_dir.mkdir(parents=True, exist_ok=True)
     path = book_dir / _BOOK_CONFIG_FILENAME
-    path.write_text(json.dumps({"voice_ids": voice_ids}, ensure_ascii=False, indent=0), encoding="utf-8")
+    payload: dict = {"voice_ids": voice_ids}
+    if tts_engine:
+        payload["tts_engine"] = tts_engine
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=0), encoding="utf-8")
 
 
 def _save_processed_text_with_roles(book_dir: Path, ubf: UserBookFormat) -> None:
@@ -532,6 +547,7 @@ def post_process_book_stage4(
     """
     user_id = (x_user_id or "").strip() or "anonymous"
     book_id = (body or {}).get("book_id")
+    _log.info("process-book-stage4 request book_id=%s user_id=%s", book_id, user_id)
     if not book_id:
         raise HTTPException(status_code=400, detail="book_id is required")
     max_tasks = int((body or {}).get("max_tasks", 500))
@@ -601,10 +617,12 @@ def post_process_book_stage4(
             "speaker_wav_path": speaker_wav_path,
         })
 
-    # Переиспользование уже озвученных строк: если line_{id}.wav есть и голос роли не менялся — в done, иначе в pending.
+    # Переиспользование уже озвученных строк: если line_{id}.wav есть, голоса и движок TTS не менялись — в done, иначе в pending.
     lines_dir = book_dir / "lines"
     lines_dir.mkdir(parents=True, exist_ok=True)
-    prev_voice_ids = _load_book_voice_config(book_dir) or {}
+    prev_voice_ids, prev_tts_engine = _load_book_voice_config(book_dir)
+    prev_voice_ids = prev_voice_ids or {}
+    tts_engine_unchanged = (prev_tts_engine or "qwen3") == tts_engine
     done: dict[int, str] = {}
     pending_ids: list[int] = []
     for t in lines_data:
@@ -612,7 +630,7 @@ def post_process_book_stage4(
         role = t.get("role", "narrator")
         existing_path = lines_dir / f"line_{line_id}.wav"
         voice_unchanged = prev_voice_ids.get(role) == effective_voice_ids.get(role)
-        if existing_path.exists() and voice_unchanged:
+        if existing_path.exists() and voice_unchanged and tts_engine_unchanged:
             done[line_id] = str(existing_path)
         else:
             # Голос роли изменился или файла не было — переозвучиваем. Удаляем старый файл, чтобы не использовать его.
@@ -623,7 +641,7 @@ def post_process_book_stage4(
                     pass
             pending_ids.append(line_id)
     pending = deque(pending_ids)
-    _save_book_voice_config(book_dir, effective_voice_ids)
+    _save_book_voice_config(book_dir, effective_voice_ids, tts_engine)
     # Чтобы при смене голосов не отдавать старый final.wav, удаляем его при наличии pending.
     if pending:
         final_wav = book_dir / "final.wav"
@@ -643,22 +661,42 @@ def post_process_book_stage4(
             "voice_ids": effective_voice_ids,
             "tts_engine": tts_engine,
         }
-        # Добавляем в очередь на выдачу только если есть что озвучивать (без дубликатов подряд)
-        if pending and key not in _pending_books:
+        # Если есть pending — книга всегда должна быть в очереди (убираем старый ключ, добавляем один раз)
+        enqueued = False
+        if pending:
+            try:
+                _pending_books.remove(key)
+            except ValueError:
+                pass
             _pending_books.append(key)
+            enqueued = True
 
     # Если все строки переиспользованы (ничего в pending) — сразу собираем финальный WAV.
     final_path = None
     if not pending and done:
         final_path = _assemble_final_audio(user_id, book_id)
 
+    remaining = len(pending)
+    if remaining == 0 and done:
+        _log.info(
+            "process-book-stage4: book_id=%s remaining_tasks=0 (all %s lines already done, nothing enqueued for stage4). "
+            "To re-synthesize, switch tts_engine (e.g. to XTTS2), change voices, or remove books/%s/%s/lines/*.wav",
+            book_id, len(done), user_id, book_id,
+        )
+    else:
+        _log.info(
+            "process-book-stage4: book_id=%s remaining_tasks=%s enqueued=%s tts_engine=%s (stage4 will poll tts-next)",
+            book_id, remaining, enqueued if remaining else False, tts_engine,
+        )
+
     return {
         "book_id": book_id,
         "processed_tasks": len(done),
-        "remaining_tasks": len(pending),
+        "remaining_tasks": remaining,
         "book_status": "done" if (not pending and done) else "processing",
         "final_audio_path": str(final_path) if final_path else None,
         "stopped": False,
+        "all_lines_done": bool(remaining == 0 and done),
     }
 
 
@@ -701,7 +739,12 @@ def post_tts_next():
             }
             if task.get("speaker_wav_path"):
                 result["speaker_wav_path"] = task["speaker_wav_path"]
+            _log.info(
+                "tts-next: issued task book_id=%s line_id=%s tts_engine=%s",
+                result.get("book_id"), result.get("line_id"), result.get("tts_engine", "qwen3"),
+            )
             return result
+    _log.info("tts-next: queue empty (no pending books/tasks), returning 404")
     raise HTTPException(status_code=404, detail="No pending tasks")
 
 

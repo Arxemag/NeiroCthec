@@ -540,7 +540,12 @@ export default function ProjectPage() {
       setChaptersReadyFromApp([]);
       try {
         await putAudioConfigVoiceIds(selectedVoiceIds, { ttsEngine });
-        await processBookStage4(lastUploadedBookId, 500, selectedVoiceIds, ttsEngine);
+        const stage4Res = await processBookStage4(lastUploadedBookId, 500, selectedVoiceIds, ttsEngine);
+        if (stage4Res.remaining_tasks === 0 && stage4Res.all_lines_done) {
+          setError(
+            'Все строки уже озвучены. Чтобы переозвучить, смените движок TTS (например на XTTS2) или голоса и нажмите «Сгенерировать озвучку» снова.'
+          );
+        }
         startAppProgressTracking(lastUploadedBookId);
       } catch (e: any) {
         const msg = e?.message ?? '';

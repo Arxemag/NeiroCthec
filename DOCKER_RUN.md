@@ -161,6 +161,12 @@ docker compose logs -f api
   - фронтенд должен вызывать Core (порт 8000) для скачивания: `NEXT_PUBLIC_APP_API_URL=http://localhost:8000`. Скачивание (`GET /books/:id/download`) запускает сборку.
   - при Qwen3 в Docker: используйте `docker-compose.nvidia-tts.yml` с профилем `nvidia-tts`, чтобы Stage4 обращался к `http://tts-qwen3:8020`. XTTS2 всегда идёт на `http://tts-xtts:8021`.
 
+- **Озвучка с фронта не идёт / нет запросов в TTS**:
+  - Очередь задач (tts-next) хранится **в памяти Core**. После перезапуска контейнера `core` она пуста. Нажмите «Сгенерировать озвучку» ещё раз — пайплайн заново сформирует задачи и добавит книгу в очередь.
+  - Если в Core видите `enqueued=True` и `remaining_tasks=N`, но в логах Core нет вызовов `tts-next`, а в stage4 логов нет — **контейнер stage4 не опрашивает Core**. Проверьте: `docker compose ps` (stage4 в статусе Up?), `docker compose logs stage4 --tail 30`. Должны быть строки либо `tts task ...` (есть задачи), либо раз в ~30 сек `tts-next empty (stage4 polling ...)` (очередь пуста, но воркер жив). Если логов нет — перезапустите stage4; убедитесь, что в окружении stage4 задано `CORE_INTERNAL_URL=http://core:8000/internal` (в корневом compose так и есть).
+  - Если все строки книги уже озвучены (есть `lines/line_*.wav` и не менялись голоса/движок), в очередь ничего не добавляется. На фронте появится подсказка; чтобы переозвучить — смените движок TTS (например на XTTS2) или голоса и снова нажмите «Сгенерировать озвучку».
+  - В логах Core смотрите: `process-book-stage4 request book_id=...` (запрос дошёл), `remaining_tasks=N enqueued=True` (задачи в очереди), `tts-next: issued task ...` (stage4 забрал задачу), `tts-next: queue empty` (воркер опрашивает, но очередь пуста). В логах stage4: `tts task ... engine=xtts2 url=...` — запросы уходят в TTS.
+
 - **Core API или Stage4 не видят TTS**:
   - Qwen3 по умолчанию на хосте (8020), XTTS2 — в контейнере `tts-xtts` (8021). Убедитесь, что контейнер `tts-xtts` запущен и переменные `EXTERNAL_TTS_QWEN3_URL`, `EXTERNAL_TTS_XTTS_URL` заданы для stage4;
   - на Windows для доступа из контейнера к локальному Qwen3 используйте `host.docker.internal`.

@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 import threading
 import wave
 from contextlib import asynccontextmanager
@@ -57,6 +58,8 @@ def _load_xtts() -> bool:
         return False
     _XTTS_LOADING = True
     try:
+        from tts_engine_xtts.xtts_patch import apply_xtts_position_embeddings_patch
+        apply_xtts_position_embeddings_patch()
         from TTS.api import TTS
         use_gpu = os.getenv("TTS_USE_GPU", "true").strip().lower() in ("1", "true", "yes")
         _XTTS_MODEL = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu, progress_bar=False)
@@ -77,11 +80,90 @@ def _resolve_speaker_wav(request: SynthesizeRequest) -> str | None:
     return get_voice_path(request.speaker)
 
 
+# Кавычки всех видов — убираем, чтобы не озвучивались
+_QUOTE_CHARS = "\"\"\"'''''\u00ab\u00bb\u201e\u201c\u2018\u2033\u2032\u2033\u300c\u300d\u301f\u00b4`"
+
+TARGET_CHUNK_CHARS = 100
+
+
+def _normalize_text_for_xtts(text: str) -> str:
+    """
+    Нормализация текста перед XTTS: уменьшает артифакты и «озвучивание» пунктуации.
+    По документации Coqui: точка в конце часто произносится как слово; тире обрабатываются неоднозначно.
+    """
+    if not text or not text.strip():
+        return text
+    t = text.strip()
+    for q in _QUOTE_CHARS:
+        t = t.replace(q, "")
+    lines = t.split("\n")
+    normalized_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            normalized_lines.append("")
+            continue
+        if line.endswith(".") and len(line) > 1:
+            line = line[:-1] + "..."
+        elif line.endswith("...") and len(line) > 3:
+            line = line.rstrip(".").rstrip() + "..."
+        normalized_lines.append(line)
+    t = "\n".join(normalized_lines)
+    while ". " in t:
+        t = t.replace(". ", "... ")
+    for dash in ("\u2014", "\u2013", "\u2012"):
+        t = t.replace(dash, " - ")
+    while "  " in t:
+        t = t.replace("  ", " ")
+    return t.strip() or text.strip()
+
+
+def _chunk_text(text: str, target: int = TARGET_CHUNK_CHARS, min_len: int = 60, max_len: int = 140) -> list[str]:
+    """Разбиение на чанки по границам слов для ровного темпа (вариант A). Один speaker_wav на все чанки."""
+    if not text or not text.strip():
+        return []
+    t = text.strip()
+    if len(t) <= max_len:
+        return [t]
+    words = t.split()
+    if not words:
+        return [t]
+    chunks = []
+    current = []
+    current_len = 0
+    for w in words:
+        w_len = len(w) + (1 if current else 0)
+        if current_len + w_len > max_len and current:
+            chunks.append(" ".join(current))
+            current = [w]
+            current_len = len(w)
+        else:
+            current.append(w)
+            current_len += w_len
+    if current:
+        chunks.append(" ".join(current))
+    return chunks
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    import asyncio
+    # Загрузка модели в фоне; не принимать запросы, пока модель не готова
     def _load():
         _load_xtts()
+
     threading.Thread(target=_load, daemon=True).start()
+    logger.info("tts-xtts: waiting for model to load (up to 300s)...")
+    for i in range(300):
+        await asyncio.sleep(1.0)
+        if _XTTS_MODEL is not None:
+            logger.info("tts-xtts: model ready, accepting requests")
+            break
+        if _XTTS_ERROR and "failed" in (_XTTS_ERROR or "").lower():
+            logger.warning("tts-xtts: model load failed, starting anyway: %s", _XTTS_ERROR)
+            break
+    else:
+        logger.warning("tts-xtts: model load timeout (300s), starting anyway")
     yield
 
 
@@ -107,13 +189,53 @@ def voices() -> list[dict]:
     return [{"id": v["id"], "path": v["path"], "source": v["source"]} for v in reg]
 
 
+def _xtts_inference_params(audio_config: dict | None) -> dict[str, Any]:
+    """Параметры инференса из audio_config или переменных окружения."""
+    cfg = audio_config or {}
+    return {
+        "temperature": float(cfg.get("temperature", os.getenv("TTS_XTTS_TEMPERATURE", "0.35"))),
+        "speed": float(cfg.get("speed", os.getenv("TTS_XTTS_SPEED", "1.0"))),
+        "split_sentences": False,  # вариант A: разбиваем сами по чанкам, в TTS не разбивать
+    }
+
+
+def _concat_wavs(wav_paths: list[Path], out_path: Path) -> tuple[int, int]:
+    """Склеивает WAV-файлы с одинаковыми параметрами. Возвращает (nframes, framerate)."""
+    if not wav_paths:
+        raise ValueError("No WAV files to concatenate")
+    params = None
+    all_frames: list[bytes] = []
+    total_nframes = 0
+    for p in wav_paths:
+        with wave.open(str(p), "rb") as wf:
+            p_nch, p_sw, p_fr, p_nf, p_comp, p_compn = wf.getparams()
+            if params is None:
+                params = (p_nch, p_sw, p_fr)
+            elif (p_nch, p_sw, p_fr) != params:
+                logger.warning("WAV params differ %s vs %s", (p_nch, p_sw, p_fr), params)
+            all_frames.append(wf.readframes(p_nf))
+            total_nframes += p_nf
+    with wave.open(str(out_path), "wb") as out:
+        out.setnchannels(params[0])
+        out.setsampwidth(params[1])
+        out.setframerate(params[2])
+        for f in all_frames:
+            out.writeframes(f)
+    return total_nframes, params[2]
+
+
 @app.post("/synthesize")
 def synthesize(request: SynthesizeRequest) -> Response:
+    t0 = time.perf_counter()
+    logger.info("synthesize request: text_len=%s speaker=%s", len(request.text or ""), request.speaker)
     if not _load_xtts():
         raise HTTPException(
             status_code=503,
             detail=_XTTS_ERROR or "XTTS v2 not loaded",
         )
+    t_load = time.perf_counter() - t0
+    if t_load > 0.5:
+        logger.info("xtts model ready (load/init took %.1fs)", t_load)
     speaker_wav = _resolve_speaker_wav(request)
     if not speaker_wav:
         raise HTTPException(
@@ -123,23 +245,68 @@ def synthesize(request: SynthesizeRequest) -> Response:
     lang = "ru"
     if request.audio_config and isinstance(request.audio_config.get("language"), str):
         lang = request.audio_config["language"]
+    text_clean = _normalize_text_for_xtts(request.text)
+    if not text_clean.strip():
+        raise HTTPException(status_code=400, detail="Text is empty after normalization")
+    params = _xtts_inference_params(request.audio_config)
+    cfg = request.audio_config or {}
+    # Режим без чанков (один вызов tts_to_file): TTS_XTTS_SINGLE_CHUNK=1 — для проверки, не ломает ли чанкинг
+    use_chunks = os.getenv("TTS_XTTS_SINGLE_CHUNK", "").strip().lower() not in ("1", "true", "yes")
+    max_chunk = int(cfg.get("chunk_max") or os.getenv("TTS_XTTS_CHUNK_MAX", "140"))
+    chunks = _chunk_text(text_clean, max_len=max_chunk) if use_chunks else [text_clean]
     out_path = Path(tempfile.gettempdir()) / "tts_xtts_out.wav"
+    temp_dir = Path(tempfile.gettempdir())
+    chunk_paths: list[Path] = []
     try:
-        _XTTS_MODEL.tts_to_file(
-            text=request.text,
-            file_path=str(out_path),
-            speaker_wav=speaker_wav,
-            language=lang,
-        )
-        content = out_path.read_bytes()
-        with wave.open(BytesIO(content), "rb") as wf:
-            duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+        base_kw: dict[str, Any] = {
+            "speaker_wav": speaker_wav,
+            "language": lang,
+            "split_sentences": False,
+            "temperature": params["temperature"],
+            "speed": params["speed"],
+        }
+        for i, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+            chunk_path = temp_dir / f"tts_xtts_chunk_{i}.wav"
+            chunk_paths.append(chunk_path)
+            t_chunk = time.perf_counter()
+            kwargs = {**base_kw, "text": chunk, "file_path": str(chunk_path)}
+            try:
+                _XTTS_MODEL.tts_to_file(**kwargs)
+            except TypeError:
+                kwargs.pop("temperature", None)
+                kwargs.pop("speed", None)
+                _XTTS_MODEL.tts_to_file(**kwargs)
+            except Exception as e:
+                logger.exception("tts_to_file failed for chunk %s/%s: %s", i + 1, len(chunks), e)
+                raise HTTPException(status_code=500, detail=f"TTS chunk failed: {e!s}") from e
+            logger.info("chunk %s/%s done in %.1fs", i + 1, len(chunks), time.perf_counter() - t_chunk)
+        if not chunk_paths:
+            raise HTTPException(status_code=400, detail="No audio generated")
+        if len(chunk_paths) == 1:
+            content = chunk_paths[0].read_bytes()
+            with wave.open(BytesIO(content), "rb") as wf:
+                duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+        else:
+            _concat_wavs(chunk_paths, out_path)
+            content = out_path.read_bytes()
+            with wave.open(BytesIO(content), "rb") as wf:
+                duration_ms = int((wf.getnframes() / wf.getframerate()) * 1000)
+        total_s = time.perf_counter() - t0
+        logger.info("synthesize done in %.1fs (audio %sms)", total_s, duration_ms)
         return Response(
             content=content,
             media_type="audio/wav",
             headers={"x-duration-ms": str(duration_ms)},
         )
     finally:
+        for p in chunk_paths:
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
         if out_path.exists():
             try:
                 out_path.unlink()
