@@ -176,6 +176,42 @@ def _speaker_settings_to_emotion(speaker_settings: dict, role: str) -> dict:
     }
 
 
+def _split_text_for_xtts(text: str, max_len: int = 182) -> list[str]:
+    """
+    Жёстко ограничивает длину для XTTS2 (<= 182).
+    Режем по . ! ? в диапазоне ~80..max, иначе по пробелу, иначе по max.
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+    if len(t) <= max_len:
+        return [t]
+    parts: list[str] = []
+    start = 0
+    min_len = 80
+    while start < len(t):
+        end = min(start + max_len, len(t))
+        cut = None
+        scan_start = min(start + min_len, len(t))
+        for i in range(scan_start, end):
+            if t[i] in ".!?":
+                cut = i + 1
+                break
+        if cut is None:
+            space = t.rfind(" ", start + 60, end)
+            if space > start:
+                cut = space
+            else:
+                cut = end
+        if cut <= start:
+            cut = min(start + max_len, len(t))
+        part = t[start:cut].strip()
+        if part:
+            parts.append(part)
+        start = cut
+    return parts
+
+
 def _build_ubf_from_state(lines_data: list, done: dict) -> UserBookFormat:
     """Собирает UserBookFormat для stage5 из state (lines + done). Пути к WAV приводятся к абсолютным."""
     line_objs = []
@@ -769,7 +805,7 @@ def _process_book_stage4_post_stage3(
     sample_orig_lens = [(l.idx, len((l.original or "").strip()), bool((l.original or "").strip())) for l in sorted_lines[:3]]
     _log.info("process-book-stage4: building lines_data ubf.lines=%s sample_orig_len=%s", len(ubf.lines), sample_orig_lens)
     for line in sorted_lines:
-        if len(lines_data) >= max_tasks:
+        if max_tasks and len(lines_data) >= max_tasks:
             break
         if not (line.original or "").strip():
             skipped_empty += 1
@@ -785,19 +821,27 @@ def _process_book_stage4_post_stage3(
         voice_for_tts = effective_voice_ids.get(role) or role
         speaker_wav_path = get_voice_path(voice_for_tts, user_id=user_id)
         emotion_for_tts = _speaker_settings_to_emotion(speaker_settings, role)
-        lines_data.append({
-            "line_id": line.idx,
-            "text": (text_for_task or "").strip(),
-            "voice": voice_for_tts,
-            "role": role,
-            "emotion": emotion_for_tts,
-            "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
-            "chapter_id": (line.chapter_id if line.chapter_id is not None else 1),
-            "tts_engine": tts_engine,
-            "speaker_wav_path": speaker_wav_path,
-            "is_chapter_header": getattr(line, "is_chapter_header", False),
-            "type": line.type or "narrator",
-        })
+        parts = [text_for_task.strip()]
+        if tts_engine == "xtts2" and len(parts[0]) > 182:
+            parts = _split_text_for_xtts(parts[0], max_len=182)
+        for pi, part in enumerate(parts, start=1):
+            if not part:
+                continue
+            # Чтобы сохранить порядок, делаем новый line_id для частей: base*1000 + part_index
+            line_id = line.idx * 1000 + pi if len(parts) > 1 else line.idx
+            lines_data.append({
+                "line_id": line_id,
+                "text": part.strip(),
+                "voice": voice_for_tts,
+                "role": role,
+                "emotion": emotion_for_tts,
+                "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
+                "chapter_id": (line.chapter_id if line.chapter_id is not None else 1),
+                "tts_engine": tts_engine,
+                "speaker_wav_path": speaker_wav_path,
+                "is_chapter_header": getattr(line, "is_chapter_header", False) and pi == 1,
+                "type": line.type or "narrator",
+            })
 
     _log.info(
         "process-book-stage4: ubf.lines=%s lines_data=%s skipped_empty=%s skipped_empty_text=%s",
@@ -897,7 +941,7 @@ def post_process_book_stage4(
     )
     if not book_id:
         raise HTTPException(status_code=400, detail="book_id is required")
-    max_tasks = int((body or {}).get("max_tasks", 500))
+    max_tasks = int((body or {}).get("max_tasks", 0))
     voice_ids = (body or {}).get("voice_ids") or {}
     if isinstance(voice_ids, dict):
         voice_ids = {k: v for k, v in voice_ids.items() if v}

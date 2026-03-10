@@ -55,16 +55,31 @@ REMARK_RE = re.compile(
     re.IGNORECASE
 )
 
-# Заголовки глав: «Глава N», «Chapter N», «Часть N», markdown # / ##
+# Заголовки глав: «Глава N», «Chapter N» (строгие строки + допускаем заголовок после номера)
 CHAPTER_HEADER_RE = re.compile(
     r'^\s*(?:'
-    r'#+\s*.*|'  # markdown ## Заголовок
-    r'Глава\s+\d+|'
-    r'Chapter\s+\d+|'
-    r'Часть\s+\d+|'
-    r'Часть\s+[IVXLCDM]+|'
-    r'Глава\s+[IVXLCDM]+|'
-    r'Chapter\s+[IVXLCDM]+'
+    r'Глава\s+\d+.*|'
+    r'Chapter\s+\d+.*|'
+    r'Глава\s+[IVXLCDM]+.*|'
+    r'Chapter\s+[IVXLCDM]+.*'
+    r')\s*$',
+    re.IGNORECASE
+)
+
+CHAPTER_INLINE_RE = re.compile(
+    r'\b(?:Глава|Chapter)\s+(?:\d+|[IVXLCDM]+)\b',
+    re.IGNORECASE
+)
+
+# Метаданные/секции книги, которые должны быть отдельной строкой (не глава)
+BOOK_META_HEADER_RE = re.compile(
+    r'^\s*(?:'
+    r'#\s*.*|'
+    r'Посмертие[-–—]?\s*\d+.*|'
+    r'Альфа.*|'
+    r'Часть\s+(?:первая|вторая|третья|четвертая|четвёртая|пятая|шестая|седьмая|восьмая|девятая|десятая)\b.*|'
+    r'Пролог\b.*|'
+    r'Эпилог\b.*'
     r')\s*$',
     re.IGNORECASE
 )
@@ -285,6 +300,82 @@ class StructuralParser:
 
         return final_parts
 
+    def _parse_chapter_id(self, header: str) -> int | None:
+        """Пытается извлечь номер главы из заголовка (arabic/roman)."""
+        m = re.search(r'\b(?:Глава|Chapter)\s+(\d+)\b', header, re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                return None
+        m = re.search(r'\b(?:Глава|Chapter)\s+([IVXLCDM]+)\b', header, re.IGNORECASE)
+        if m:
+            roman = m.group(1).upper()
+            roman_map = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
+            total = 0
+            prev = 0
+            for ch in reversed(roman):
+                val = roman_map.get(ch, 0)
+                if val < prev:
+                    total -= val
+                else:
+                    total += val
+                    prev = val
+            return total if total > 0 else None
+        return None
+
+    def _split_compound_header_line(self, text: str) -> list[str]:
+        """
+        Разделяет строки вида:
+        "Посмертие-6... Альфа... Часть вторая Глава 1 Возмездие Перед глазами..."
+        на отдельные логические строки:
+        1) "Посмертие-6... Альфа... Часть вторая"
+        2) "Глава 1 Возмездие"
+        3) "Перед глазами..."
+        """
+        t = (text or "").strip()
+        if not t:
+            return []
+        m = CHAPTER_INLINE_RE.search(t)
+        if not m:
+            return [t]
+        before = t[:m.start()].strip()
+        after = t[m.start():].strip()
+        parts: list[str] = []
+        if before:
+            parts.append(before)
+        if not after:
+            return parts
+        # after начинается с "Глава N ..." — отделяем заголовок от основного текста
+        words = after.split()
+        if len(words) <= 2:
+            parts.append(after)
+            return parts
+        # Ищем позицию после "Глава N"
+        try:
+            idx = 0
+            if re.fullmatch(r'(Глава|Chapter)', words[idx], re.IGNORECASE):
+                idx += 1
+            if idx < len(words) and re.fullmatch(r'(\d+|[IVXLCDM]+)', words[idx], re.IGNORECASE):
+                idx += 1
+        except Exception:
+            idx = 0
+        # Всё что после номера: title + body
+        tail = words[idx:]
+        if len(tail) <= 2:
+            parts.append(after)
+            return parts
+        # Заголовок: первые 2 слова после номера, остальное — текст главы
+        title_words = tail[:2]
+        body_words = tail[2:]
+        header = " ".join(words[:idx] + title_words).strip()
+        body = " ".join(body_words).strip()
+        if header:
+            parts.append(header)
+        if body:
+            parts.append(body)
+        return parts
+
     def parse_file(self, book_path: Path) -> UserBookFormat:
         """Парсинг файла с поддержкой сегментов и разметки глав по заголовкам."""
         parsed_lines: List[Line] = []
@@ -298,40 +389,51 @@ class StructuralParser:
                     continue
 
                 original = self._soft_clean(raw)
-                is_chapter_header = bool(CHAPTER_HEADER_RE.match(original))
-                # Текущая строка (и сегменты) принадлежит current_chapter; после заголовка увеличиваем счётчик для следующих
-                chapter_id = current_chapter
-                if is_chapter_header:
-                    current_chapter += 1
+                for logical in self._split_compound_header_line(original):
+                    logical = (logical or "").strip()
+                    if not logical:
+                        continue
+                    is_chapter_header = bool(CHAPTER_HEADER_RE.match(logical))
+                    is_meta_header = bool(BOOK_META_HEADER_RE.match(logical))
+                    # Заголовок главы относится к новой главе, а не к предыдущей
+                    if is_chapter_header:
+                        parsed_ch = self._parse_chapter_id(logical)
+                        if parsed_ch is not None:
+                            current_chapter = parsed_ch
+                        else:
+                            current_chapter += 1
+                        chapter_id = current_chapter
+                    else:
+                        chapter_id = current_chapter
 
-                is_dialogue = bool(DIALOGUE_START_RE.match(original))
+                    is_dialogue = bool(DIALOGUE_START_RE.match(logical))
 
-                # Разбиваем как диалоги, так и повествование
-                if self.split_for_xtts and self._should_split_for_xtts(original):
-                    segment_lines = self._split_for_xtts(
-                        original, idx, is_dialogue, chapter_id=chapter_id, is_chapter_header=is_chapter_header
-                    )
-                    parsed_lines.extend(segment_lines)
-                else:
-                    # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная индексация
-                    line = Line(
-                        idx=self._next_id,  # 🔥 Последовательный ID
-                        type="dialogue" if is_dialogue else "narrator",
-                        original=original,
-                        remarks=self._extract_remarks(original) if is_dialogue else [],
-                        is_segment=False,
-                        segment_index=None,
-                        segment_total=None,
-                        full_original=None,
-                        base_line_id=self._next_id,  # 🔥 Для несмегментированных строк base_id = id
-                        chapter_id=chapter_id,
-                        is_chapter_header=is_chapter_header,
-                        speaker=None,
-                        emotion=None,
-                        audio_path=None
-                    )
-                    parsed_lines.append(line)
-                    self._next_id += 1  # 🔥 Увеличиваем счетчик
+                    # Разбиваем как диалоги, так и повествование
+                    if self.split_for_xtts and self._should_split_for_xtts(logical):
+                        segment_lines = self._split_for_xtts(
+                            logical, idx, is_dialogue, chapter_id=chapter_id, is_chapter_header=is_chapter_header
+                        )
+                        parsed_lines.extend(segment_lines)
+                    else:
+                        # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная индексация
+                        line = Line(
+                            idx=self._next_id,  # 🔥 Последовательный ID
+                            type="dialogue" if is_dialogue else "narrator",
+                            original=logical,
+                            remarks=self._extract_remarks(logical) if is_dialogue else [],
+                            is_segment=False,
+                            segment_index=None,
+                            segment_total=None,
+                            full_original=None,
+                            base_line_id=self._next_id,  # 🔥 Для несмегментированных строк base_id = id
+                            chapter_id=chapter_id,
+                            is_chapter_header=is_chapter_header or is_meta_header,
+                            speaker=None,
+                            emotion=None,
+                            audio_path=None
+                        )
+                        parsed_lines.append(line)
+                        self._next_id += 1  # 🔥 Увеличиваем счетчик
 
         # 🔥 Проверяем порядок ID
         self._validate_line_order(parsed_lines)

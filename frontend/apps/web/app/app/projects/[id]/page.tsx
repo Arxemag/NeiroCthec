@@ -95,6 +95,7 @@ export default function ProjectPage() {
   const [projectBooks, setProjectBooks] = useState<AppBook[]>([]);
   /** Номера готовых глав (из GET /books/:id/status chapters_ready) — для раннего воспроизведения по главам. */
   const [chaptersReadyFromApp, setChaptersReadyFromApp] = useState<number[]>([]);
+  const [chapterAudioUrls, setChapterAudioUrls] = useState<Record<number, string>>({});
   /** Превью по спикерам: URL аудио для narrator, male, female (после «Озвучить фрагмент»). */
   const [previewFragmentUrls, setPreviewFragmentUrls] = useState<{ narrator?: string; male?: string; female?: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -549,8 +550,13 @@ export default function ProjectPage() {
         URL.revokeObjectURL(finalBookAudioUrlRef.current);
         finalBookAudioUrlRef.current = null;
       }
+      Object.values(chapterAudioUrls).forEach((url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {}
+      });
     };
-  }, []);
+  }, [chapterAudioUrls]);
 
   async function saveProject() {
     if (!project) return;
@@ -631,6 +637,33 @@ export default function ProjectPage() {
       }
     }, 2000);
   }
+
+  useEffect(() => {
+    if (!isAppApiEnabled() || !lastUploadedBookId) return;
+    if (!chaptersReadyFromApp.length) return;
+    let cancelled = false;
+    (async () => {
+      for (const num of chaptersReadyFromApp) {
+        if (chapterAudioUrls[num]) continue;
+        try {
+          const res = await appFetch(`/books/${encodeURIComponent(lastUploadedBookId)}/chapters/${num}`);
+          if (!res.ok) continue;
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          if (cancelled) {
+            URL.revokeObjectURL(url);
+            continue;
+          }
+          setChapterAudioUrls((prev) => ({ ...prev, [num]: url }));
+        } catch {
+          // ignore
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chaptersReadyFromApp, lastUploadedBookId, chapterAudioUrls, isAppApiEnabled]);
 
   const activeBookId = lastUploadedBookId ?? projectBooks[0]?.id ?? null;
 
@@ -2128,16 +2161,21 @@ export default function ProjectPage() {
               </p>
               <div className="flex flex-wrap gap-2">
                 {chaptersReadyFromApp.map((num) => {
-                  const chapterSrc = getBookChapterAudioUrl(lastUploadedBookId, num);
-                  if (!chapterSrc) return null;
+                  const chapterSrc = chapterAudioUrls[num];
                   return (
-                    <audio
-                      key={num}
-                      controls
-                      className="w-full min-w-[200px]"
-                      src={chapterSrc}
-                      title={`Глава ${num}`}
-                    />
+                    chapterSrc ? (
+                      <audio
+                        key={num}
+                        controls
+                        className="w-full min-w-[200px]"
+                        src={chapterSrc}
+                        title={`Глава ${num}`}
+                      />
+                    ) : (
+                      <div key={num} className="text-xs text-textSecondary">
+                        Глава {num}: загрузка…
+                      </div>
+                    )
                   );
                 })}
               </div>

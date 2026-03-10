@@ -40,11 +40,16 @@ async function proxy(request: NextRequest, pathSegments: string[]) {
     signal: AbortSignal.timeout(timeoutMs),
   } as RequestInit);
 
-  const resContentType = res.headers.get('content-type') || 'application/json';
-  const text = await res.text();
-  return new NextResponse(text, {
+  const buf = await res.arrayBuffer();
+  const outHeaders = new Headers();
+  res.headers.forEach((value, key) => {
+    // content-encoding может ломать ответы при повторной упаковке
+    if (key.toLowerCase() === 'content-encoding') return;
+    outHeaders.set(key, value);
+  });
+  return new NextResponse(Buffer.from(buf), {
     status: res.status,
-    headers: { 'Content-Type': resContentType },
+    headers: outHeaders,
   });
 }
 

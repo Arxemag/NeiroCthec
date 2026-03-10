@@ -136,6 +136,7 @@ export function AppShell(props: { children: React.ReactNode }) {
                 <NavLink href="/app/books">Мои книги</NavLink>
                 <NavLink href="/app/subscription">Подписка</NavLink>
                 <NavLink href="/app/profile">Профиль</NavLink>
+                <NavLink href="/app/admin/voices">Админка войса</NavLink>
                 {!isLoadingUser && isAdmin && (
                   <NavLink href="/app/admin">Админ-панель</NavLink>
                 )}

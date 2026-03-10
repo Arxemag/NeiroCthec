@@ -10,9 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements-core.txt .
 RUN pip install --no-cache-dir -r requirements-core.txt && \
-    pip install --no-cache-dir python-multipart
+    pip install --no-cache-dir python-multipart debugpy
 
 COPY . .
 ENV PYTHONUNBUFFERED=1
-EXPOSE 8000
+EXPOSE 8000 5678
 CMD ["python", "main.py"]

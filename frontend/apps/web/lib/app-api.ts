@@ -177,6 +177,9 @@ export async function getBookStatus(bookId: string): Promise<AppBookStatusRespon
 
 /** URL для проигрывания главы книги (GET /books/:id/chapters/:num). */
 export function getBookChapterAudioUrl(bookId: string, chapterNum: number): string {
+  if (USE_PROXY && typeof window !== 'undefined') {
+    return `${window.location.origin}${APP_API_PROXY_PREFIX}/books/${encodeURIComponent(bookId)}/chapters/${chapterNum}`;
+  }
   const base = getAppApiUrl();
   if (!base) return '';
   return `${base}/books/${encodeURIComponent(bookId)}/chapters/${chapterNum}`;
@@ -338,19 +341,13 @@ export async function uploadVoice(
   file: File,
   options?: { name?: string; role?: 'narrator' | 'male' | 'female' }
 ): Promise<{ id: string; name?: string; role?: string }> {
-  const base = getAppApiUrl();
-  if (!base) throw new Error('NEXT_PUBLIC_APP_API_URL is not set');
   const formData = new FormData();
   formData.append('file', file);
   if (options?.name?.trim()) formData.append('name', options.name.trim());
   if (options?.role) formData.append('role', options.role);
-  const headers = getAppHeaders({ method: 'POST' });
-  headers.delete('Content-Type');
-  const res = await fetch(`${base}/voices/upload`, {
+  const res = await appFetch('/voices/upload', {
     method: 'POST',
-    headers,
     body: formData,
-    credentials: 'include',
   });
   const text = await res.text();
   let data: unknown = null;

@@ -57,6 +57,7 @@ services:
       dockerfile: Dockerfile.core
     ports:
       - "8000:8000"
+      - "5678:5678"
     volumes:
       - ./app:/app
       - ./app/storage:/app/storage
@@ -65,6 +66,8 @@ services:
       - APP_STORAGE_ROOT=/app/storage
       # Превью по спикерам: Core дергает stage4 по имени сервиса
       - APP_STAGE4_URL=http://stage4:8001
+      # Для отладки в PyCharm (Remote Debug): раскомментируйте; сначала запустите в PyCharm "Python Remote Debug" на порту 5678
+      # - DEBUGPY_CONNECT=1
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
       interval: 10s

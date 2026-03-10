@@ -53,6 +53,12 @@ export default function AdminPage() {
         >
           Пользователи
         </Link>
+        <Link
+          href="/app/admin/voices"
+          className="inline-flex items-center rounded-lg bg-zinc-800 px-4 py-2 font-medium text-zinc-50 hover:bg-zinc-700"
+        >
+          Голоса
+        </Link>
       </div>
 
       {error && (
