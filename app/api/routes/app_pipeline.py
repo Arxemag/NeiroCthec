@@ -41,6 +41,7 @@ _APP_ROOT = Path(__file__).resolve().parent.parent.parent
 _storage_env = os.environ.get("APP_STORAGE_ROOT") or os.environ.get("CORE_STORAGE_PATH")
 STORAGE_ROOT = Path(_storage_env) if _storage_env else _APP_ROOT / "storage"
 
+
 # In-memory настройки голосов (tts_engine: qwen3 | xtts2)
 _audio_settings: dict = {"config": {"voice_ids": {}, "tts_engine": "qwen3"}}
 
@@ -176,10 +177,11 @@ def _speaker_settings_to_emotion(speaker_settings: dict, role: str) -> dict:
     }
 
 
-def _split_text_for_xtts(text: str, max_len: int = 182) -> list[str]:
+def _split_text_for_xtts(text: str, max_len: int = 100) -> list[str]:
     """
-    Жёстко ограничивает длину для XTTS2 (<= 182).
-    Режем по . ! ? в диапазоне ~80..max, иначе по пробелу, иначе по max.
+    Ограничивает длину чанков для XTTS2 (по умолчанию 100 символов).
+    Режем только по точке: от границы max_len ищем точку влево и вправо, режем по той, что ближе.
+    По пробелу не режем.
     """
     t = (text or "").strip()
     if not t:
@@ -188,23 +190,34 @@ def _split_text_for_xtts(text: str, max_len: int = 182) -> list[str]:
         return [t]
     parts: list[str] = []
     start = 0
-    min_len = 80
     while start < len(t):
-        end = min(start + max_len, len(t))
-        cut = None
-        scan_start = min(start + min_len, len(t))
-        for i in range(scan_start, end):
-            if t[i] in ".!?":
-                cut = i + 1
-                break
-        if cut is None:
-            space = t.rfind(" ", start + 60, end)
-            if space > start:
-                cut = space
+        boundary = min(start + max_len, len(t))
+        if boundary >= len(t):
+            part = t[start:].strip()
+            if part:
+                parts.append(part)
+            break
+        # Ищем точку влево от boundary (в [start, boundary))
+        left_dot = t.rfind(".", start, boundary)
+        cut_left = (left_dot + 1) if left_dot >= 0 else -1
+        # Ищем точку вправо от boundary (в [boundary, boundary + max_len])
+        right_span = min(boundary + max_len, len(t))
+        right_dot = t.find(".", boundary, right_span)
+        cut_right = (right_dot + 1) if right_dot >= 0 else -1
+
+        if cut_left >= 0 and cut_right >= 0:
+            # Обе найдены — режем по той, что ближе к boundary
+            if (boundary - cut_left) <= (cut_right - boundary):
+                cut = cut_left
             else:
-                cut = end
-        if cut <= start:
-            cut = min(start + max_len, len(t))
+                cut = cut_right
+        elif cut_left >= 0:
+            cut = cut_left
+        elif cut_right >= 0:
+            cut = cut_right
+        else:
+            # Точки нет — жёсткий разрез по boundary (по пробелу не режем)
+            cut = boundary
         part = t[start:cut].strip()
         if part:
             parts.append(part)
@@ -245,7 +258,14 @@ def _build_ubf_from_state(lines_data: list, done: dict) -> UserBookFormat:
                 audio_path=audio_path,
             )
         )
-    line_objs.sort(key=lambda l: l.idx)
+    # Сортировка: при XTTS-разбиении line_id = base*1000+pi; числовая сортировка дала бы 5,6,5001,5002.
+    # Сортируем по (base, part), чтобы порядок был 5,5001,5002,6.
+    def _line_sort_key(l: Line) -> tuple:
+        i = l.idx
+        if i >= 1000:
+            return (i // 1000, i % 1000)
+        return (i, 0)
+    line_objs.sort(key=_line_sort_key)
     return UserBookFormat(user_id=0, book_id=0, version="v1", lines=line_objs)
 
 
@@ -822,8 +842,8 @@ def _process_book_stage4_post_stage3(
         speaker_wav_path = get_voice_path(voice_for_tts, user_id=user_id)
         emotion_for_tts = _speaker_settings_to_emotion(speaker_settings, role)
         parts = [text_for_task.strip()]
-        if tts_engine == "xtts2" and len(parts[0]) > 182:
-            parts = _split_text_for_xtts(parts[0], max_len=182)
+        if tts_engine == "xtts2" and len(parts[0]) > 100:
+            parts = _split_text_for_xtts(parts[0], max_len=100)
         for pi, part in enumerate(parts, start=1):
             if not part:
                 continue
