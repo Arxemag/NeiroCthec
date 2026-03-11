@@ -19,6 +19,16 @@ export class UsersController {
     return { user: await this.users.getById(req.user.sub) };
   }
 
+  /**
+   * DEV-эндпоинт: сделать текущего пользователя админом.
+   * Легко вырезать: удалить этот метод и кнопку на фронте.
+   */
+  @UseGuards(AccessAuthGuard)
+  @Post('/me/dev-become-admin')
+  async devBecomeAdmin(@Req() req: any) {
+    return { user: await this.users.makeAdmin(req.user.sub) };
+  }
+
   /** Список своих голосов (метаданные: name, coreVoiceId). Файлы в Core. */
   @UseGuards(AccessAuthGuard)
   @Get('/me/voices')

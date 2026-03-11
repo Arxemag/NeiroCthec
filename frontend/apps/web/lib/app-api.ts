@@ -252,6 +252,81 @@ export async function getAudiobookStreamBlob(folder: string): Promise<{ blob: Bl
 
 export type TtsEngine = 'qwen3' | 'xtts2';
 
+/** Ответ GET /books/settings/audio — глобальные настройки аудио/TTS (voice_ids, tts_engine, настройки XTTS2). */
+export type AudioSettingsResponse = { config?: Record<string, unknown> };
+
+/** GET /books/settings/audio — текущие настройки (голоса, движок, XTTS2). */
+export async function getAudioSettings(): Promise<AudioSettingsResponse> {
+  return appJson<AudioSettingsResponse>('/books/settings/audio').catch(() => ({ config: {} }));
+}
+
+/** Настройки XTTS2 (температура, длина, повторы, сэмплинг, скорость, язык, сплит текста). Ключи в config:
+ *  xtts2_temperature, xtts2_length_penalty, xtts2_repetition_penalty, xtts2_top_k, xtts2_top_p,
+ *  xtts2_speed, xtts2_language, xtts2_split_sentences.
+ *  При озвучке пайплайн должен передавать их в audio_config для движка XTTS2.
+ */
+export type Xtts2Settings = {
+  temperature?: number;
+  lengthPenalty?: number;
+  repetitionPenalty?: number;
+  topK?: number;
+  topP?: number;
+  speed?: number;
+  language?: string;
+  splitSentences?: boolean;
+};
+
+/** Достать из config только настройки XTTS2. */
+export function parseXtts2SettingsFromConfig(config: Record<string, unknown> | undefined): Xtts2Settings {
+  const c = config ?? {};
+  const num = (key: string, def: number) => {
+    const v = c[key];
+    if (typeof v === 'number' && !Number.isNaN(v)) return v;
+    if (typeof v === 'string') {
+      const n = parseFloat(v);
+      if (!Number.isNaN(n)) return n;
+    }
+    return def;
+  };
+  const bool = (key: string, def: boolean) => {
+    const v = c[key];
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') {
+      const s = v.trim().toLowerCase();
+      if (['1', 'true', 'yes', 'on'].includes(s)) return true;
+      if (['0', 'false', 'no', 'off'].includes(s)) return false;
+    }
+    return def;
+  };
+  return {
+    temperature: num('xtts2_temperature', 0.35),
+    lengthPenalty: num('xtts2_length_penalty', 1.0),
+    repetitionPenalty: num('xtts2_repetition_penalty', 2.0),
+    topK: num('xtts2_top_k', 50),
+    topP: num('xtts2_top_p', 0.85),
+    speed: num('xtts2_speed', 1.0),
+    language: typeof c.xtts2_language === 'string' ? c.xtts2_language : 'ru',
+    splitSentences: bool('xtts2_split_sentences', true),
+  };
+}
+
+/** Сохранить настройки XTTS2 (GET + merge + PUT /books/settings/audio). Остальные ключи config не трогает. */
+export async function putXtts2Settings(settings: Xtts2Settings): Promise<void> {
+  const current = await getAudioSettings();
+  const config: Record<string, unknown> = {
+    ...(current?.config && typeof current.config === 'object' ? current.config : {}),
+  };
+  if (settings.temperature !== undefined) config.xtts2_temperature = settings.temperature;
+  if (settings.lengthPenalty !== undefined) config.xtts2_length_penalty = settings.lengthPenalty;
+  if (settings.repetitionPenalty !== undefined) config.xtts2_repetition_penalty = settings.repetitionPenalty;
+  if (settings.topK !== undefined) config.xtts2_top_k = settings.topK;
+  if (settings.topP !== undefined) config.xtts2_top_p = settings.topP;
+  if (settings.speed !== undefined) config.xtts2_speed = settings.speed;
+  if (settings.language !== undefined) config.xtts2_language = settings.language;
+  if (settings.splitSentences !== undefined) config.xtts2_split_sentences = settings.splitSentences;
+  await appJson<unknown>('/books/settings/audio', { method: 'PUT', body: JSON.stringify({ config }) });
+}
+
 /** Сохранить выбор голосов и/или движка TTS (GET + merge + PUT /books/settings/audio). */
 export async function putAudioConfigVoiceIds(
   voiceIds: { narrator?: string; male?: string; female?: string },

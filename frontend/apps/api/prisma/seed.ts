@@ -58,6 +58,15 @@ async function main() {
   });
 
   console.log('Seeded admin:', { email: admin.email, password: adminPassword });
+
+  // Назначить админом пользователя monax120@gmail.com (если уже зарегистрирован)
+  const updated = await prisma.user.updateMany({
+    where: { email: 'monax120@gmail.com' },
+    data: { role: UserRole.admin },
+  });
+  if (updated.count > 0) {
+    console.log('Seeded: monax120@gmail.com set as admin');
+  }
 }
 
 main()

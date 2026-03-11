@@ -847,6 +847,52 @@ def _process_book_stage4_post_stage3(
         for pi, part in enumerate(parts, start=1):
             if not part:
                 continue
+            # audio_config: voice_ids для всех движков; для XTTS2 — параметры из глобальных настроек (админка)
+            audio_config: dict = {}
+            if effective_voice_ids:
+                audio_config["voice_ids"] = effective_voice_ids
+            if tts_engine == "xtts2":
+                cfg = _audio_settings.get("config") or {}
+                try:
+                    audio_config["temperature"] = float(cfg.get("xtts2_temperature") or 0.35)
+                except (TypeError, ValueError):
+                    audio_config["temperature"] = 0.35
+                try:
+                    audio_config["speed"] = float(cfg.get("xtts2_speed") or 1.0)
+                except (TypeError, ValueError):
+                    audio_config["speed"] = 1.0
+                if cfg.get("xtts2_language"):
+                    audio_config["language"] = str(cfg["xtts2_language"])
+                # Продвинутые параметры XTTS2
+                try:
+                    audio_config["length_penalty"] = float(cfg.get("xtts2_length_penalty") or 1.0)
+                except (TypeError, ValueError):
+                    audio_config["length_penalty"] = 1.0
+                try:
+                    audio_config["repetition_penalty"] = float(cfg.get("xtts2_repetition_penalty") or 2.0)
+                except (TypeError, ValueError):
+                    audio_config["repetition_penalty"] = 2.0
+                try:
+                    v_top_k = cfg.get("xtts2_top_k")
+                    if v_top_k is not None:
+                        audio_config["top_k"] = int(v_top_k)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    v_top_p = cfg.get("xtts2_top_p")
+                    if v_top_p is not None:
+                        audio_config["top_p"] = float(v_top_p)
+                except (TypeError, ValueError):
+                    pass
+                split = cfg.get("xtts2_split_sentences")
+                if isinstance(split, bool):
+                    audio_config["split_sentences"] = split
+                elif isinstance(split, str):
+                    s = split.strip().lower()
+                    if s in ("1", "true", "yes", "on"):
+                        audio_config["split_sentences"] = True
+                    elif s in ("0", "false", "no", "off"):
+                        audio_config["split_sentences"] = False
             # Чтобы сохранить порядок, делаем новый line_id для частей: base*1000 + part_index
             line_id = line.idx * 1000 + pi if len(parts) > 1 else line.idx
             lines_data.append({
@@ -855,7 +901,7 @@ def _process_book_stage4_post_stage3(
                 "voice": voice_for_tts,
                 "role": role,
                 "emotion": emotion_for_tts,
-                "audio_config": {"voice_ids": effective_voice_ids} if effective_voice_ids else None,
+                "audio_config": audio_config if audio_config else None,
                 "chapter_id": (line.chapter_id if line.chapter_id is not None else 1),
                 "tts_engine": tts_engine,
                 "speaker_wav_path": speaker_wav_path,

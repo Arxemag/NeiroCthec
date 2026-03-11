@@ -253,10 +253,58 @@ def voices() -> list[dict]:
 def _xtts_inference_params(audio_config: dict | None) -> dict[str, Any]:
     """Параметры инференса из audio_config или переменных окружения."""
     cfg = audio_config or {}
+    def _num(key: str, env_name: str, default: float, min_v: float, max_v: float) -> float:
+        v = cfg.get(key)
+        try:
+            if v is not None:
+                x = float(v)
+            else:
+                x = float(os.getenv(env_name, str(default)))
+        except (TypeError, ValueError):
+            x = default
+        return max(min_v, min(max_v, x))
+
+    def _int_opt(key: str, env_name: str) -> int | None:
+        v = cfg.get(key)
+        if v is None:
+            v = os.getenv(env_name)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _bool(key: str, env_name: str, default: bool) -> bool:
+        v = cfg.get(key)
+        if v is None:
+            v = os.getenv(env_name)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off"):
+                return False
+        return default
+
+    temperature = _num("temperature", "TTS_XTTS_TEMPERATURE", 0.35, 0.05, 2.0)
+    speed = _num("speed", "TTS_XTTS_SPEED", 1.0, 0.5, 2.0)
+    length_penalty = _num("length_penalty", "TTS_XTTS_LENGTH_PENALTY", 1.0, 0.1, 5.0)
+    repetition_penalty = _num("repetition_penalty", "TTS_XTTS_REPETITION_PENALTY", 2.0, 1.0, 5.0)
+    top_k = _int_opt("top_k", "TTS_XTTS_TOP_K")
+    top_p = _num("top_p", "TTS_XTTS_TOP_P", 0.85, 0.1, 1.0)
+    split_sentences = _bool("split_sentences", "TTS_XTTS_SPLIT_SENTENCES", True)
+
     return {
-        "temperature": float(cfg.get("temperature", os.getenv("TTS_XTTS_TEMPERATURE", "0.35"))),
-        "speed": float(cfg.get("speed", os.getenv("TTS_XTTS_SPEED", "1.0"))),
-        "split_sentences": False,
+        "temperature": temperature,
+        "speed": speed,
+        "length_penalty": length_penalty,
+        "repetition_penalty": repetition_penalty,
+        "top_k": top_k,
+        "top_p": top_p,
+        "split_sentences": split_sentences,
     }
 
 
@@ -308,6 +356,7 @@ def synthesize(request: SynthesizeRequest) -> Response:
     lang = "ru"
     if request.audio_config and isinstance(request.audio_config.get("language"), str):
         lang = request.audio_config["language"]
+    # Управление нормализацией текста только через env (не конфигурируем с фронта)
     use_normalize = os.getenv("TTS_XTTS_NORMALIZE_TEXT", "").strip().lower() in ("1", "true", "yes")
     text_clean = _normalize_text_for_xtts(request.text) if use_normalize else (request.text or "").strip()
     if not text_clean:
@@ -320,10 +369,15 @@ def synthesize(request: SynthesizeRequest) -> Response:
             "file_path": str(out_path),
             "speaker_wav": speaker_wav,
             "language": lang,
-            "split_sentences": False,
+            "split_sentences": params["split_sentences"],
             "temperature": params["temperature"],
             "speed": params["speed"],
+            "length_penalty": params["length_penalty"],
+            "repetition_penalty": params["repetition_penalty"],
+            "top_p": params["top_p"],
         }
+        if params.get("top_k") is not None:
+            kwargs["top_k"] = params["top_k"]
         try:
             _XTTS_MODEL.tts_to_file(**kwargs)
         except TypeError:

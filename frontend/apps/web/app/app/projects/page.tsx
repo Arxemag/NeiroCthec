@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { Check, Trash2, X } from 'lucide-react';
 import { apiJson } from '../../../lib/api';
-import { getAppApiUrl, deleteBooksByProject } from '../../../lib/app-api';
+import { getAppApiUrl, isAppApiEnabled, deleteBooksByProject, listBooksByProject, getBookStatus } from '../../../lib/app-api';
 import { Button } from '../../../components/ui';
 import { useRouter } from 'next/navigation';
 
@@ -36,12 +36,40 @@ export default function ProjectsPage() {
   const [trashLoading, setTrashLoading] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
 
+  // Прогресс озвучки по проектам (для карточек). Наполняется по App API, легко удалить.
+  const [projectProgress, setProjectProgress] = useState<Record<string, number | undefined>>({});
+
+  async function updateProjectsProgress(list: Project[]) {
+    // В режиме proxy (Docker) getAppApiUrl() возвращает пустую строку,
+    // поэтому ориентируемся на isAppApiEnabled().
+    if (!isAppApiEnabled()) {
+      setProjectProgress({});
+      return;
+    }
+    const map: Record<string, number | undefined> = {};
+    for (const p of list) {
+      try {
+        const books = await listBooksByProject(p.id);
+        if (!books || books.length === 0) continue;
+        const book = books[0];
+        const st = await getBookStatus(book.id);
+        if (typeof st.progress === 'number') {
+          map[p.id] = st.progress;
+        }
+      } catch {
+        // ignore per-project errors
+      }
+    }
+    setProjectProgress(map);
+  }
+
   async function load() {
     setLoading(true);
     setError(null);
     try {
       const data = await apiJson<{ projects: Project[] }>('/api/projects');
       setProjects(data.projects);
+      await updateProjectsProgress(data.projects);
     } catch (e: any) {
       setError(e?.message ?? 'Ошибка загрузки');
     } finally {
@@ -52,6 +80,27 @@ export default function ProjectsPage() {
   useEffect(() => {
     void load();
   }, []);
+
+  // Автообновление прогресса озвучки на карточках (каждые 5 секунд).
+  useEffect(() => {
+    if (!isAppApiEnabled()) return;
+    if (projects.length === 0) return;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        await updateProjectsProgress(projects);
+      } catch {
+        // ошибки прогресса не должны ломать список проектов
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [projects]);
 
   async function createQuickProject() {
     try {
@@ -155,58 +204,115 @@ export default function ProjectsPage() {
           </div>
         ) : (
           <div className="grid gap-3">
-            {projects.map((p) => (
-              <div
-                key={p.id}
-                className="flex items-center gap-3 rounded-2xl border border-border bg-surfaceSoft p-4 transition-colors hover:bg-surface hover:border-accent/30"
-              >
-                <Link href={`/app/projects/${p.id}`} className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="font-medium text-text">{p.title}</div>
-                      <div className="mt-1 text-sm text-textSecondary">
-                        {p.language} · {p.status}
+            {projects.map((p) => {
+              const rawProgress = projectProgress[p.id];
+              const hasProgress =
+                typeof rawProgress === 'number' && rawProgress >= 0 && rawProgress <= 100;
+
+              const progressCircle = hasProgress
+                ? (() => {
+                    const progress = Math.round(rawProgress || 0);
+                    const radius = 16;
+                    const circumference = 2 * Math.PI * radius;
+                    const clamped = Math.max(0, Math.min(100, progress));
+                    const offset = circumference * (1 - clamped / 100);
+                    return (
+                      <svg viewBox="0 0 40 40" className="h-10 w-10" aria-hidden="true">
+                        <circle
+                          cx="20"
+                          cy="20"
+                          r={radius}
+                          fill="transparent"
+                          stroke="var(--color-border)"
+                          strokeWidth="3"
+                        />
+                        <circle
+                          cx="20"
+                          cy="20"
+                          r={radius}
+                          fill="transparent"
+                          stroke="var(--color-accent)"
+                          strokeWidth="3"
+                          strokeDasharray={circumference}
+                          strokeDashoffset={offset}
+                          strokeLinecap="round"
+                          transform="rotate(-90 20 20)"
+                        />
+                        <text
+                          x="50%"
+                          y="50%"
+                          dominantBaseline="middle"
+                          textAnchor="middle"
+                          fontSize="10"
+                          fill="var(--color-text)"
+                        >
+                          {clamped}%
+                        </text>
+                      </svg>
+                    );
+                  })()
+                : null;
+
+              return (
+                <div
+                  key={p.id}
+                  className="flex items-stretch gap-3 rounded-2xl border border-border bg-surfaceSoft p-4 transition-colors hover:bg-surface hover:border-accent/30"
+                >
+                  <Link href={`/app/projects/${p.id}`} className="min-w-0 flex-1">
+                    <div className="flex h-full items-center">
+                      <div className="flex-1">
+                        <div className="font-medium text-text">{p.title}</div>
+                        <div className="mt-1 text-sm text-textSecondary">
+                          {p.language} · {p.status}
+                        </div>
+                        <div className="mt-1 text-xs text-textMuted">
+                          {new Date(p.updatedAt).toLocaleString()}
+                        </div>
                       </div>
                     </div>
-                    <div className="shrink-0 text-xs text-textMuted">{new Date(p.updatedAt).toLocaleString()}</div>
-                  </div>
-                </Link>
-                {expandedDeleteId === p.id ? (
-                  <div className="flex shrink-0 items-center gap-1 rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-900/20 overflow-hidden">
+                  </Link>
+
+                  {progressCircle && (
+                    <div className="flex items-center justify-center px-2">{progressCircle}</div>
+                  )}
+
+                  {expandedDeleteId === p.id ? (
+                    <div className="flex shrink-0 items-center gap-1 rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-900/20 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => deleteProject(p.id, p.title)}
+                        disabled={deletingId === p.id}
+                        className="flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/30 disabled:opacity-50"
+                        aria-label="Подтвердить удаление"
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                        Подтвердить
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setExpandedDeleteId(null)}
+                        disabled={deletingId === p.id}
+                        className="flex items-center gap-1 border-l border-red-300 dark:border-red-800 px-2 py-1.5 text-xs font-medium text-textSecondary hover:bg-surface disabled:opacity-50"
+                        aria-label="Отменить удаление"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        Отменить
+                      </button>
+                    </div>
+                  ) : (
                     <button
                       type="button"
-                      onClick={() => deleteProject(p.id, p.title)}
+                      onClick={() => setExpandedDeleteId(p.id)}
                       disabled={deletingId === p.id}
-                      className="flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/30 disabled:opacity-50"
-                      aria-label="Подтвердить удаление"
+                      className="shrink-0 rounded p-2 text-textMuted hover:bg-red-900/20 hover:text-red-400 disabled:opacity-50 transition-colors"
+                      aria-label="Удалить проект"
                     >
-                      <Check className="h-3.5 w-3.5" />
-                      Подтвердить
+                      <Trash2 className="h-4 w-4" />
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setExpandedDeleteId(null)}
-                      disabled={deletingId === p.id}
-                      className="flex items-center gap-1 border-l border-red-300 dark:border-red-800 px-2 py-1.5 text-xs font-medium text-textSecondary hover:bg-surface disabled:opacity-50"
-                      aria-label="Отменить удаление"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                      Отменить
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setExpandedDeleteId(p.id)}
-                    disabled={deletingId === p.id}
-                    className="shrink-0 rounded p-2 text-textMuted hover:bg-red-900/20 hover:text-red-400 disabled:opacity-50 transition-colors"
-                    aria-label="Удалить проект"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                )}
-              </div>
-            ))}
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
