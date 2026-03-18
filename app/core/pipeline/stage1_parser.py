@@ -446,12 +446,86 @@ class StructuralParser:
         # 🔥 Выводим информацию о порядке
         self._print_order_info(parsed_lines)
 
+        # 🔥 Валидация контракта stage1 перед передачей в stage2.
+        # Это целевой инвариант: структура книги (главы/строки/сегменты) должна быть консистентной.
+        self._validate_stage1_contract(parsed_lines)
+
         return UserBookFormat(
             user_id=1,
             book_id=1,
             version="v1",
             lines=parsed_lines
         )
+
+    def _validate_stage1_contract(self, lines: List[Line]) -> None:
+        if not isinstance(lines, list):
+            raise ValueError("Stage1 contract: lines must be a list")
+        if not lines:
+            raise ValueError("Stage1 contract: empty lines")
+
+        for i, line in enumerate(lines):
+            if not isinstance(line.idx, int):
+                raise ValueError(f"Stage1 contract: line[{i}] idx must be int")
+            if line.idx < 0:
+                raise ValueError(f"Stage1 contract: line[{i}] idx must be >= 0")
+
+            if not isinstance(line.original, str) or not line.original.strip():
+                raise ValueError(f"Stage1 contract: line[{i}] original must be non-empty str")
+
+            if line.type not in ("dialogue", "narrator"):
+                raise ValueError(f"Stage1 contract: line[{i}] type invalid: {line.type!r}")
+
+            if line.chapter_id is None or not isinstance(line.chapter_id, int) or line.chapter_id < 1:
+                raise ValueError(f"Stage1 contract: line[{i}] chapter_id invalid: {line.chapter_id!r}")
+
+            if not isinstance(line.is_chapter_header, bool):
+                raise ValueError(f"Stage1 contract: line[{i}] is_chapter_header must be bool")
+
+            if line.is_segment:
+                # Сегментная строка: сегментные поля обязаны быть заполнены
+                if line.segment_index is None or line.segment_total is None or line.base_line_id is None:
+                    raise ValueError(f"Stage1 contract: line[{i}] segment fields required")
+                if not isinstance(line.segment_index, int) or line.segment_index < 0:
+                    raise ValueError(f"Stage1 contract: line[{i}] segment_index invalid: {line.segment_index!r}")
+                if not isinstance(line.segment_total, int) or line.segment_total < 1:
+                    raise ValueError(f"Stage1 contract: line[{i}] segment_total invalid: {line.segment_total!r}")
+                if line.segment_index >= line.segment_total:
+                    raise ValueError(
+                        f"Stage1 contract: line[{i}] segment_index >= segment_total: "
+                        f"{line.segment_index!r} >= {line.segment_total!r}"
+                    )
+                if not isinstance(line.base_line_id, int) or line.base_line_id < 0:
+                    raise ValueError(f"Stage1 contract: line[{i}] base_line_id invalid: {line.base_line_id!r}")
+            else:
+                # Негментированная строка не должна иметь корректных segment_* (допускаем None)
+                if line.segment_index is not None or line.segment_total is not None:
+                    raise ValueError(
+                        f"Stage1 contract: line[{i}] non-segment must have segment_index/segment_total=None"
+                    )
+
+        # Проверяем согласованность сегментов в пределах одного base_line_id
+        segment_lines = [l for l in lines if l.is_segment and l.base_line_id is not None]
+        by_base: dict[int, list[Line]] = {}
+        for l in segment_lines:
+            by_base.setdefault(l.base_line_id, []).append(l)
+
+        for base_id, group in by_base.items():
+            if not group:
+                continue
+            # segment_total должно совпадать у всех сегментов одной строки
+            totals = {g.segment_total for g in group}
+            if len(totals) != 1:
+                raise ValueError(f"Stage1 contract: base_line_id={base_id} segment_total mismatch: {totals!r}")
+            total = next(iter(totals))
+            indices = sorted([g.segment_index for g in group if g.segment_index is not None])
+            if len(indices) != total:
+                raise ValueError(
+                    f"Stage1 contract: base_line_id={base_id} expected {total} segments, got {len(indices)}"
+                )
+            if indices and (indices[0] != 0 or indices[-1] != total - 1):
+                raise ValueError(
+                    f"Stage1 contract: base_line_id={base_id} indices must cover [0..{total-1}], got {indices!r}"
+                )
 
     def _validate_line_order(self, lines: List[Line]):
         """Проверяет что ID идут последовательно"""

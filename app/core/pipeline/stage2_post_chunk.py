@@ -144,3 +144,41 @@ def process(ubf: UserBookFormat) -> None:
             next_idx += 1
 
     ubf.lines = new_lines
+
+    _validate_stage2_contract(ubf)
+
+
+def _validate_stage2_contract(ubf: UserBookFormat) -> None:
+    """
+    Contract validation stage2+post_chunk (см. docs/specs/PIPELINE_STAGE2_MODULE.md).
+    Проверяем:
+      - role/speaker: narrator|male|female для всех непустых строк
+      - chapter_id: >= 1
+      - chunking: длина чанка в разумных пределах и детерминированные idx
+    """
+    if not hasattr(ubf, "lines") or not isinstance(ubf.lines, list):
+        raise ValueError("Stage2 contract: ubf.lines must be a list")
+
+    # post_chunk_process генерирует детерминированный последовательный idx
+    idxs = [l.idx for l in ubf.lines]
+    if idxs != list(range(len(idxs))):
+        raise ValueError("Stage2 contract: line idx must be sequential starting from 0")
+
+    for i, line in enumerate(ubf.lines):
+        if not isinstance(line.original, str):
+            raise ValueError(f"Stage2 contract: line[{i}] original must be str")
+        if not line.original.strip():
+            # пустые чанки не должны попадать в stage4
+            raise ValueError(f"Stage2 contract: line[{i}] original must be non-empty")
+
+        if line.speaker not in ("narrator", "male", "female"):
+            raise ValueError(f"Stage2 contract: line[{i}] invalid speaker: {line.speaker!r}")
+
+        if line.chapter_id is None or not isinstance(line.chapter_id, int) or line.chapter_id < 1:
+            raise ValueError(f"Stage2 contract: line[{i}] invalid chapter_id: {line.chapter_id!r}")
+
+        # Грубая граница по чанкингу после stage2_post_chunk.
+        if len(line.original) > (CHUNK_MAX_CHARS + 10):
+            raise ValueError(
+                f"Stage2 contract: line[{i}] chunk too long: {len(line.original)} > {CHUNK_MAX_CHARS + 10}"
+            )

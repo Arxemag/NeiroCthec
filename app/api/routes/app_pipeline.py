@@ -7,6 +7,7 @@ stage4 worker дергает /internal/tts-next и /internal/tts-complete.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -25,7 +26,7 @@ _log = logging.getLogger(__name__)
 _BOOK_CONFIG_FILENAME = "config.json"
 
 from fastapi import APIRouter, Body, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from core.models import UserBookFormat, Line, EmotionProfile, Remark
 from core.pipeline.stage1_parser import StructuralParser
@@ -44,6 +45,446 @@ STORAGE_ROOT = Path(_storage_env) if _storage_env else _APP_ROOT / "storage"
 
 # In-memory настройки голосов (tts_engine: qwen3 | xtts2)
 _audio_settings: dict = {"config": {"voice_ids": {}, "tts_engine": "qwen3"}}
+
+# TaskRegistry (NestJS) — опциональная интеграция
+# Если TASK_REGISTRY_API_URL не задан, то Core пропускает создание/обновление RenderTask в Postgres.
+_TASK_REGISTRY_API_URL = (os.environ.get("TASK_REGISTRY_API_URL") or "").strip().rstrip("/")
+_TASK_REGISTRY_INTERNAL_TOKEN = os.environ.get("TASK_REGISTRY_INTERNAL_TOKEN") or ""
+_TASK_REGISTRY_HEADERS: dict[str, str] = (
+    {"X-Internal-Token": _TASK_REGISTRY_INTERNAL_TOKEN} if _TASK_REGISTRY_INTERNAL_TOKEN else {}
+)
+
+
+def _make_render_task_id(
+    *,
+    client_id: str,
+    book_id: str,
+    line_id: int,
+    text: str,
+    voice: str,
+    emotion: dict,
+    audio_config: dict | None,
+    tts_engine: str,
+) -> str:
+    """Детерминированный taskId: один и тот же вход → один и тот же sha256."""
+    payload = {
+        "clientId": client_id,
+        "bookId": book_id,
+        "lineId": line_id,
+        "text": (text or "").strip(),
+        "voice": voice,
+        "emotion": emotion or {},
+        "audioConfig": audio_config or {},
+        "ttsEngine": tts_engine,
+    }
+    s = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _uri_for_line(user_id: str, book_id: str, line_id: int) -> str:
+    """URI (относительно STORAGE_ROOT) как ожидает Core proxy /internal/storage."""
+    p = STORAGE_ROOT / "books" / user_id / book_id / "lines" / f"line_{line_id}.wav"
+    try:
+        return str(p.relative_to(STORAGE_ROOT))
+    except ValueError:
+        return str(p.resolve())
+
+
+def _task_registry_upsert_queued(
+    *,
+    task_id: str,
+    client_id: str,
+    book_id: str,
+    line_id: int,
+    chapter_id: int | None,
+    speaker: str | None,
+    line_type: str | None,
+    emotion: dict | None,
+    is_chapter_header: bool | None,
+    is_segment: bool | None,
+    segment_index: int | None,
+    segment_total: int | None,
+    base_line_id: int | None,
+    engine: str,
+) -> None:
+    if not _TASK_REGISTRY_API_URL:
+        return
+    try:
+        requests.post(
+            f"{_TASK_REGISTRY_API_URL}/internal/task-registry/tasks",
+            json={
+                "taskId": task_id,
+                "clientId": client_id,
+                "bookId": book_id,
+                "lineId": line_id,
+                "chapterId": chapter_id,
+                "speaker": speaker,
+                "lineType": line_type,
+                "emotion": emotion,
+                "isChapterHeader": (1 if is_chapter_header else 0) if is_chapter_header is not None else None,
+                "isSegment": (1 if is_segment else 0) if is_segment is not None else None,
+                "segmentIndex": segment_index,
+                "segmentTotal": segment_total,
+                "baseLineId": base_line_id,
+                "engine": engine,
+            },
+            headers=_TASK_REGISTRY_HEADERS,
+            timeout=10,
+        ).raise_for_status()
+    except Exception as e:
+        _log.warning("TaskRegistry upsert failed taskId=%s: %s", task_id, e)
+
+
+def _task_registry_complete(
+    *,
+    task_id: str,
+    client_id: str,
+    book_id: str,
+    line_id: int,
+    storage_key: str,
+    chapter_id: int | None = None,
+    duration_ms: float | None = None,
+) -> None:
+    if not _TASK_REGISTRY_API_URL:
+        return
+    payload: dict = {"storageKey": storage_key}
+    if chapter_id is not None:
+        payload["chapterId"] = chapter_id
+    if duration_ms is not None:
+        payload["durationMs"] = duration_ms
+    try:
+        requests.post(
+            f"{_TASK_REGISTRY_API_URL}/internal/task-registry/tasks/{task_id}/complete",
+            json=payload,
+            headers=_TASK_REGISTRY_HEADERS,
+            timeout=10,
+        ).raise_for_status()
+    except Exception as e:
+        _log.warning("TaskRegistry complete failed taskId=%s: %s", task_id, e)
+
+
+def _task_registry_get_task(task_id: str) -> dict | None:
+    """Прочитать RenderTask из TaskRegistry (NestJS) по taskId."""
+    if not _TASK_REGISTRY_API_URL:
+        return None
+    try:
+        res = requests.get(
+            f"{_TASK_REGISTRY_API_URL}/internal/task-registry/tasks/{task_id}",
+            headers=_TASK_REGISTRY_HEADERS,
+            timeout=10,
+        )
+        res.raise_for_status()
+        data = res.json()
+        if isinstance(data, dict):
+            return data
+        return None
+    except Exception as e:
+        _log.warning("TaskRegistry getTask failed taskId=%s: %s", task_id, e)
+        return None
+
+
+def _safe_resolve_storage_path(storage_key: str) -> Path | None:
+    """
+    storage_key — относительный URI относительно STORAGE_ROOT (или абсолютный путь fallback).
+    Защищаемся от path traversal: resolved path должен лежать внутри STORAGE_ROOT.
+    """
+    try:
+        base = STORAGE_ROOT.resolve()
+        p = Path(storage_key)
+        if not p.is_absolute():
+            p = base / storage_key
+        resolved = p.resolve()
+        resolved.relative_to(base)
+        return resolved
+    except Exception:
+        return None
+
+
+def _s3_generate_presigned_url(s3_key: str, expires_sec: int = 3600) -> str | None:
+    """
+    Если storageKey — это S3 key (например stage4/tasks/<clientId>/<taskId>.wav),
+    генерируем signed URL на чтение из MinIO.
+    """
+    endpoint = os.getenv("S3_ENDPOINT")
+    region = os.getenv("S3_REGION")
+    access_key = os.getenv("S3_ACCESS_KEY")
+    secret_key = os.getenv("S3_SECRET_KEY")
+    bucket = os.getenv("S3_BUCKET")
+    if not (endpoint and region and access_key and secret_key and bucket):
+        return None
+
+    try:
+        import boto3
+        from botocore.config import Config
+
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint.rstrip("/"),
+            region_name=region,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            ),
+        )
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": s3_key},
+            ExpiresIn=expires_sec,
+        )
+    except Exception:
+        return None
+
+
+def _s3_upload_file(*, local_path: Path, s3_key: str) -> bool:
+    """
+    Загружает файл в MinIO(S3) по key.
+    Возвращает True если upload прошёл (или объект уже был), иначе False.
+    """
+    endpoint = os.getenv("S3_ENDPOINT")
+    region = os.getenv("S3_REGION")
+    access_key = os.getenv("S3_ACCESS_KEY")
+    secret_key = os.getenv("S3_SECRET_KEY")
+    bucket = os.getenv("S3_BUCKET")
+    if not (endpoint and region and access_key and secret_key and bucket):
+        return False
+    if not local_path.exists() or not local_path.is_file():
+        return False
+
+    try:
+        import boto3
+        from botocore.config import Config
+
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint.rstrip("/"),
+            region_name=region,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            ),
+        )
+        client.upload_file(
+            str(local_path),
+            bucket,
+            s3_key,
+            ExtraArgs={"ContentType": "audio/wav"},
+        )
+        return True
+    except Exception as e:
+        _log.warning("S3 upload failed key=%s: %s", s3_key, e)
+        return False
+
+
+def _s3_download_file_to_temp(*, s3_key: str, tmp_suffix: str = ".wav") -> Path | None:
+    """Скачивает объект из MinIO в temp файл и возвращает Path."""
+    endpoint = os.getenv("S3_ENDPOINT")
+    region = os.getenv("S3_REGION")
+    access_key = os.getenv("S3_ACCESS_KEY")
+    secret_key = os.getenv("S3_SECRET_KEY")
+    bucket = os.getenv("S3_BUCKET")
+    if not (endpoint and region and access_key and secret_key and bucket):
+        return None
+
+
+def _audio_path_from_storage_key(storage_key: str) -> Path | None:
+    """
+    storage_key бывает:
+    - относительным URI локального storage: `books/<user>/<book>/lines/line_N.wav` (или аналог)
+    - S3 key: `stage4/tasks/<clientId>/<taskId>.wav`
+    """
+    local_path = _safe_resolve_storage_path(storage_key)
+    if local_path and local_path.exists() and local_path.is_file():
+        return local_path
+    # Fallback: скачать из S3
+    return _s3_download_file_to_temp(s3_key=storage_key)
+    try:
+        import boto3
+        from botocore.config import Config
+        import tempfile
+
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint.rstrip("/"),
+            region_name=region,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            ),
+        )
+        fd, tmp_path = tempfile.mkstemp(prefix="neurochtec_", suffix=tmp_suffix)
+        os.close(fd)
+        client.download_file(bucket, s3_key, tmp_path)
+        return Path(tmp_path)
+    except Exception as e:
+        _log.warning("S3 download failed key=%s: %s", s3_key, e)
+        return None
+
+
+def _wav_duration_ms(wav_path: Path) -> int | None:
+    """Оценка длительности wav через soundfile (в ms)."""
+    try:
+        import soundfile as sf
+
+        info = sf.info(str(wav_path))
+        if not info.samplerate or not info.frames:
+            return None
+        seconds = info.frames / float(info.samplerate)
+        return int(seconds * 1000)
+    except Exception:
+        return None
+
+
+def _task_registry_upsert_assembly(
+    *,
+    assembly_id: str,
+    client_id: str,
+    book_id: str,
+    artifact_type: str,
+    chapter_id: int,
+    storage_key: str,
+    duration_ms: int | None,
+) -> None:
+    """Записывает metadata сборки (final/chapter) в TaskRegistry (SoT в Postgres)."""
+    if not _TASK_REGISTRY_API_URL:
+        return
+    try:
+        requests.post(
+            f"{_TASK_REGISTRY_API_URL}/internal/task-registry/assemblies",
+            json={
+                "assemblyId": assembly_id,
+                "clientId": client_id,
+                "bookId": book_id,
+                "type": artifact_type,
+                "chapterId": chapter_id,
+                "storageKey": storage_key,
+                "durationMs": duration_ms,
+            },
+            headers=_TASK_REGISTRY_HEADERS,
+            timeout=10,
+        ).raise_for_status()
+    except Exception as e:
+        _log.warning("TaskRegistry upsert assembly failed assemblyId=%s: %s", assembly_id, e)
+
+
+def _task_registry_get_final_assembly_storage_key(*, client_id: str, book_id: str) -> str | None:
+    if not _TASK_REGISTRY_API_URL:
+        return None
+    try:
+        res = requests.get(
+            f"{_TASK_REGISTRY_API_URL}/internal/task-registry/assemblies/final",
+            params={"clientId": client_id, "bookId": book_id},
+            headers=_TASK_REGISTRY_HEADERS,
+            timeout=10,
+        )
+        res.raise_for_status()
+        data = res.json()
+        if isinstance(data, dict) and isinstance(data.get("assembly"), dict):
+            sk = data["assembly"].get("storageKey")
+            if isinstance(sk, str):
+                return sk
+    except Exception as e:
+        _log.warning("TaskRegistry get final assembly failed: %s", e)
+    return None
+
+
+def _task_registry_get_chapter_assembly_storage_key(
+    *, client_id: str, book_id: str, chapter_id: int
+) -> str | None:
+    if not _TASK_REGISTRY_API_URL:
+        return None
+    try:
+        res = requests.get(
+            f"{_TASK_REGISTRY_API_URL}/internal/task-registry/assemblies/chapter",
+            params={"clientId": client_id, "bookId": book_id, "chapterId": chapter_id},
+            headers=_TASK_REGISTRY_HEADERS,
+            timeout=10,
+        )
+        res.raise_for_status()
+        data = res.json()
+        if isinstance(data, dict) and isinstance(data.get("assembly"), dict):
+            sk = data["assembly"].get("storageKey")
+            if isinstance(sk, str):
+                return sk
+    except Exception as e:
+        _log.warning("TaskRegistry get chapter assembly failed: %s", e)
+    return None
+
+
+def _task_registry_list_tasks(*, client_id: str, book_id: str) -> list[dict]:
+    """Возвращает список RenderTask (SoT) по (clientId, bookId)."""
+    if not _TASK_REGISTRY_API_URL:
+        return []
+    try:
+        res = requests.get(
+            f"{_TASK_REGISTRY_API_URL}/internal/task-registry/tasks",
+            params={"clientId": client_id, "bookId": book_id},
+            headers=_TASK_REGISTRY_HEADERS,
+            timeout=10,
+        )
+        res.raise_for_status()
+        data = res.json()
+        if isinstance(data, dict) and isinstance(data.get("tasks"), list):
+            return data["tasks"]
+    except Exception:
+        pass
+    return []
+
+
+def _make_assembly_id(*, artifact_type: str, client_id: str, book_id: str, ordered_task_ids: list[str]) -> str:
+    """Детерминированный hash inputs для идемпотентности сборки."""
+    payload = {
+        "type": artifact_type,
+        "clientId": client_id,
+        "bookId": book_id,
+        "taskIds": ordered_task_ids,
+    }
+    s = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+# Redis Stream queue (Core → Stage4)
+_TTS_USE_REDIS_QUEUE = (
+    os.getenv("TTS_USE_REDIS_QUEUE", "").strip().lower() in {"1", "true", "yes", "on"}
+)
+_TTS_RENDER_STREAM = (os.getenv("TTS_RENDER_STREAM") or "tts.render.v1").strip()
+_TTS_REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
+_redis_client = None
+_redis_client_lock = threading.Lock()
+
+
+def _get_redis_client():
+    global _redis_client
+    if not _TTS_REDIS_URL:
+        return None
+    with _redis_client_lock:
+        if _redis_client is None:
+            try:
+                import redis  # type: ignore
+
+                _redis_client = redis.Redis.from_url(_TTS_REDIS_URL)
+            except Exception as e:
+                _log.warning("Redis client init failed (%s): %s", _TTS_REDIS_URL, e)
+                _redis_client = None
+    return _redis_client
+
+
+def _publish_tts_task(task_payload: dict) -> None:
+    if not _TTS_USE_REDIS_QUEUE:
+        return
+    r = _get_redis_client()
+    if not r:
+        return
+    try:
+        # payload как один JSON, чтобы схема сообщения не ломалась при добавлении полей
+        msg = json.dumps(task_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        r.xadd(_TTS_RENDER_STREAM, {"payload": msg})
+    except Exception as e:
+        _log.warning("Redis xadd failed stream=%s: %s", _TTS_RENDER_STREAM, e)
 
 # Состояние пайплайна по книгам: (user_id, book_id) -> BookPipelineState
 # BookPipelineState: dict с keys: lines, pending, done, stop_requested, voice_ids
@@ -250,7 +691,10 @@ def _build_ubf_from_state(lines_data: list, done: dict) -> UserBookFormat:
                 type=t.get("type") or "narrator",
                 original=t.get("text", ""),
                 remarks=[],
-                is_segment=False,
+                is_segment=bool(t.get("is_segment")),
+                segment_index=t.get("segment_index"),
+                segment_total=t.get("segment_total"),
+                base_line_id=t.get("base_line_id"),
                 chapter_id=t.get("chapter_id"),
                 is_chapter_header=bool(t.get("is_chapter_header")),
                 speaker=t.get("voice"),
@@ -258,15 +702,275 @@ def _build_ubf_from_state(lines_data: list, done: dict) -> UserBookFormat:
                 audio_path=audio_path,
             )
         )
-    # Сортировка: при XTTS-разбиении line_id = base*1000+pi; числовая сортировка дала бы 5,6,5001,5002.
-    # Сортируем по (base, part), чтобы порядок был 5,5001,5002,6.
+    # Сортировка: для сегментов используем base_line_id + segment_index,
+    # иначе порядок определяется idx (реальный logical line).
     def _line_sort_key(l: Line) -> tuple:
-        i = l.idx
-        if i >= 1000:
-            return (i // 1000, i % 1000)
-        return (i, 0)
+        if l.is_segment and l.base_line_id is not None and l.segment_index is not None:
+            return (l.base_line_id, l.segment_index)
+        return (l.idx, 0)
+
     line_objs.sort(key=_line_sort_key)
     return UserBookFormat(user_id=0, book_id=0, version="v1", lines=line_objs)
+
+
+def _assemble_final_audio_from_tasks(user_id: str, book_id: str) -> Path | None:
+    """Restartable stage5 сборка из RenderTask (DB), без _book_states/in-memory."""
+    tasks = _task_registry_list_tasks(client_id=user_id, book_id=book_id)
+    if not tasks:
+        return None
+
+    total = len(tasks)
+    done_tasks = [t for t in tasks if t.get("status") == "done" and isinstance(t.get("storageKey"), str) and t.get("storageKey")]
+    if len(done_tasks) < total:
+        return None
+
+    def _task_sort_key(t: dict) -> tuple:
+        if t.get("isSegment") and t.get("baseLineId") is not None and t.get("segmentIndex") is not None:
+            return (int(t.get("baseLineId")), int(t.get("segmentIndex")))
+        return (int(t.get("lineId")), 0)
+
+    # Упорядочиваем по (baseLineId, segmentIndex) для сегментов; иначе по lineId.
+    ordered = sorted(tasks, key=_task_sort_key)
+
+    # Скачиваем WAV сегменты в temp (если нужно), чтобы Stage5 читал локально.
+    temp_paths: list[Path] = []
+    try:
+        done: dict[int, str] = {}
+        lines_data: list[dict] = []
+        ordered_task_ids: list[str] = []
+
+        for t in ordered:
+            lid = int(t.get("lineId"))
+            storage_key = t.get("storageKey")
+            if not isinstance(storage_key, str) or not storage_key:
+                return None
+
+            local_path = _safe_resolve_storage_path(storage_key)
+            downloaded = False
+            if not local_path or not local_path.exists() or not local_path.is_file():
+                local_path = _s3_download_file_to_temp(s3_key=storage_key)
+                downloaded = True
+            if not local_path or not local_path.exists() or not local_path.is_file():
+                return None
+            if downloaded:
+                temp_paths.append(local_path)
+            done[lid] = str(local_path)
+
+            ordered_task_ids.append(str(t.get("taskId")))
+            lines_data.append(
+                {
+                    "line_id": lid,
+                    "text": "",
+                    "voice": t.get("speaker") or "narrator",
+                    "type": t.get("lineType") or "narrator",
+                    "chapter_id": t.get("chapterId") or 1,
+                    "is_chapter_header": bool(t.get("isChapterHeader")),
+                    "is_segment": bool(t.get("isSegment")),
+                    "segment_index": t.get("segmentIndex"),
+                    "segment_total": t.get("segmentTotal"),
+                    "base_line_id": t.get("baseLineId"),
+                    "emotion": t.get("emotion") or {},
+                }
+            )
+
+        out_file = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
+        if out_file.exists():
+            try:
+                out_file.unlink()
+            except OSError:
+                pass
+
+        ubf = _build_ubf_from_state(lines_data, done)
+        if not ubf.lines:
+            return None
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        Stage5Assembler().process(ubf, out_file)
+
+        assembly_type = "book_final_wav"
+        assembly_id = _make_assembly_id(
+            artifact_type=assembly_type,
+            client_id=user_id,
+            book_id=book_id,
+            ordered_task_ids=ordered_task_ids,
+        )
+        duration_ms = _wav_duration_ms(out_file)
+        s3_key = f"stage5/assemblies/{user_id}/{assembly_id}/final.wav"
+        uploaded = _s3_upload_file(local_path=out_file, s3_key=s3_key)
+        if uploaded:
+            _task_registry_upsert_assembly(
+                assembly_id=assembly_id,
+                client_id=user_id,
+                book_id=book_id,
+                artifact_type=assembly_type,
+                chapter_id=0,
+                storage_key=s3_key,
+                duration_ms=duration_ms,
+            )
+        _log.info(
+            "stage5_assemble final OK clientId=%s bookId=%s assemblyId=%s uploaded=%s durationMs=%s storageKey=%s tasks=%s",
+            user_id,
+            book_id,
+            assembly_id,
+            uploaded,
+            duration_ms,
+            s3_key if uploaded else None,
+            ",".join(ordered_task_ids),
+        )
+        return out_file
+    except Exception:
+        _log.exception(
+            "stage5_assemble final FAIL clientId=%s bookId=%s tasks=%s",
+            user_id,
+            book_id,
+            [str(t.get("taskId")) for t in tasks if isinstance(t, dict) and t.get("taskId")],
+        )
+        return None
+    finally:
+        for p in temp_paths:
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _assemble_chapter_audio_from_tasks(user_id: str, book_id: str, chapter_id: int) -> Path | None:
+    """Restartable сборка главы из RenderTask (DB), без _book_states."""
+    tasks = _task_registry_list_tasks(client_id=user_id, book_id=book_id)
+    if not tasks:
+        return None
+
+    def _line_sort_key_by_lid(lid: int) -> tuple:
+        if lid >= 1000:
+            return (lid // 1000, lid % 1000)
+        return (lid, 0)
+
+    # Берём только задачи нужной главы.
+    chapter_tasks: list[dict] = []
+    for t in tasks:
+        ch = t.get("chapterId")
+        if ch is None:
+            ch = 1
+        try:
+            ch_int = int(ch)
+        except Exception:
+            ch_int = 1
+        if ch_int == chapter_id:
+            chapter_tasks.append(t)
+
+    if not chapter_tasks:
+        return None
+
+    total = len(chapter_tasks)
+    done_tasks = [t for t in chapter_tasks if t.get("status") == "done" and isinstance(t.get("storageKey"), str) and t.get("storageKey")]
+    if len(done_tasks) < total:
+        return None
+
+    def _task_sort_key(t: dict) -> tuple:
+        if t.get("isSegment") and t.get("baseLineId") is not None and t.get("segmentIndex") is not None:
+            return (int(t.get("baseLineId")), int(t.get("segmentIndex")))
+        return (int(t.get("lineId")), 0)
+
+    ordered = sorted(chapter_tasks, key=_task_sort_key)
+
+    temp_paths: list[Path] = []
+    try:
+        done: dict[int, str] = {}
+        lines_data: list[dict] = []
+        ordered_task_ids: list[str] = []
+        for t in ordered:
+            lid = int(t.get("lineId"))
+            storage_key = t.get("storageKey")
+            if not isinstance(storage_key, str) or not storage_key:
+                return None
+
+            local_path = _safe_resolve_storage_path(storage_key)
+            downloaded = False
+            if not local_path or not local_path.exists() or not local_path.is_file():
+                local_path = _s3_download_file_to_temp(s3_key=storage_key)
+                downloaded = True
+            if not local_path or not local_path.exists() or not local_path.is_file():
+                return None
+            if downloaded:
+                temp_paths.append(local_path)
+            done[lid] = str(local_path)
+
+            ordered_task_ids.append(str(t.get("taskId")))
+            lines_data.append(
+                {
+                    "line_id": lid,
+                    "text": "",
+                    "voice": t.get("speaker") or "narrator",
+                    "type": t.get("lineType") or "narrator",
+                    "chapter_id": chapter_id,
+                    "is_chapter_header": bool(t.get("isChapterHeader")),
+                    "is_segment": bool(t.get("isSegment")),
+                    "segment_index": t.get("segmentIndex"),
+                    "segment_total": t.get("segmentTotal"),
+                    "base_line_id": t.get("baseLineId"),
+                    "emotion": t.get("emotion") or {},
+                }
+            )
+
+        out_file = STORAGE_ROOT / "books" / user_id / book_id / "chapters" / f"chapter_{chapter_id:03d}.wav"
+        if out_file.exists():
+            try:
+                out_file.unlink()
+            except OSError:
+                pass
+
+        ubf = _build_ubf_from_state(lines_data, done)
+        if not ubf.lines:
+            return None
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        Stage5Assembler().process(ubf, out_file)
+
+        assembly_type = "book_chapter_wav"
+        assembly_id = _make_assembly_id(
+            artifact_type=assembly_type,
+            client_id=user_id,
+            book_id=book_id,
+            ordered_task_ids=ordered_task_ids,
+        )
+        duration_ms = _wav_duration_ms(out_file)
+        s3_key = f"stage5/assemblies/{user_id}/{assembly_id}/chapter_{chapter_id:03d}.wav"
+        uploaded = _s3_upload_file(local_path=out_file, s3_key=s3_key)
+        if uploaded:
+            _task_registry_upsert_assembly(
+                assembly_id=assembly_id,
+                client_id=user_id,
+                book_id=book_id,
+                artifact_type=assembly_type,
+                chapter_id=chapter_id,
+                storage_key=s3_key,
+                duration_ms=duration_ms,
+            )
+        _log.info(
+            "stage5_assemble chapter OK clientId=%s bookId=%s chapterId=%s assemblyId=%s uploaded=%s durationMs=%s storageKey=%s tasks=%s",
+            user_id,
+            book_id,
+            chapter_id,
+            assembly_id,
+            uploaded,
+            duration_ms,
+            s3_key if uploaded else None,
+            ",".join(ordered_task_ids),
+        )
+        return out_file
+    except Exception:
+        _log.exception(
+            "stage5_assemble chapter FAIL clientId=%s bookId=%s chapterId=%s tasks=%s",
+            user_id,
+            book_id,
+            chapter_id,
+            [str(t.get("taskId")) for t in chapter_tasks if isinstance(t, dict) and t.get("taskId")],
+        )
+        return None
+    finally:
+        for p in temp_paths:
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _assemble_final_audio(user_id: str, book_id: str) -> Path | None:
@@ -275,12 +979,36 @@ def _assemble_final_audio(user_id: str, book_id: str) -> Path | None:
     with _lock:
         state = _book_states.get(key)
         if not state:
-            return None
+            return _assemble_final_audio_from_tasks(user_id=user_id, book_id=book_id)
         lines_data = state.get("lines") or []
         done = state.get("done") or {}
         # Если нет ни одной готовой строки — сборку не запускаем.
         if not lines_data or not done:
             return None
+
+        # Детерминированный порядок taskId'ов для assemblyId.
+        def _line_sort_key(t: dict) -> tuple:
+            if t.get("is_segment") and t.get("base_line_id") is not None and t.get("segment_index") is not None:
+                return (int(t.get("base_line_id")), int(t.get("segment_index")))
+            return (int(t.get("line_id")), 0)
+
+        selected = [t for t in lines_data if t.get("line_id") in done]
+        selected.sort(key=_line_sort_key)
+        ordered_task_ids: list[str] = []
+        for t in selected:
+            tid = t.get("task_id")
+            if isinstance(tid, str) and tid.strip():
+                ordered_task_ids.append(tid)
+            else:
+                ordered_task_ids.append(f"{book_id}_{int(t.get('line_id'))}")
+
+        assembly_type = "book_final_wav"
+        assembly_id = _make_assembly_id(
+            artifact_type=assembly_type,
+            client_id=user_id,
+            book_id=book_id,
+            ordered_task_ids=ordered_task_ids,
+        )
     out_file = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
     # Удаляем старый final.wav, чтобы сборка всегда писала новый (при смене голосов старый файл не должен отдаваться).
     if out_file.exists():
@@ -293,6 +1021,38 @@ def _assemble_final_audio(user_id: str, book_id: str) -> Path | None:
         return None
     out_file.parent.mkdir(parents=True, exist_ok=True)
     Stage5Assembler().process(ubf, out_file)
+
+    # S3 + Postgres (via TaskRegistry) для идемпотентности и доступа после рестарта.
+    try:
+        s3_key = f"stage5/assemblies/{user_id}/{assembly_id}/final.wav"
+        duration_ms = _wav_duration_ms(out_file)
+        uploaded = _s3_upload_file(local_path=out_file, s3_key=s3_key)
+        if uploaded:
+            _task_registry_upsert_assembly(
+                assembly_id=assembly_id,
+                client_id=user_id,
+                book_id=book_id,
+                artifact_type=assembly_type,
+                chapter_id=0,
+                storage_key=s3_key,
+                duration_ms=duration_ms,
+            )
+    except Exception:
+        pass
+    try:
+        _log.info(
+            "stage5_assemble final OK clientId=%s bookId=%s assemblyId=%s uploaded=%s durationMs=%s storageKey=%s tasks=%s",
+            user_id,
+            book_id,
+            assembly_id,
+            uploaded if "uploaded" in locals() else False,
+            duration_ms if "duration_ms" in locals() else None,
+            s3_key if "uploaded" in locals() and uploaded else None,
+            ",".join(ordered_task_ids),
+        )
+    except Exception:
+        pass
+
     return out_file
 
 
@@ -302,7 +1062,7 @@ def _assemble_chapter_audio(user_id: str, book_id: str, chapter_id: int) -> Path
     with _lock:
         state = _book_states.get(key)
         if not state:
-            return None
+            return _assemble_chapter_audio_from_tasks(user_id=user_id, book_id=book_id, chapter_id=chapter_id)
         lines_data = state.get("lines") or []
         done = state.get("done") or {}
     chapter_lines = [t for t in lines_data if (t.get("chapter_id") or 1) == chapter_id]
@@ -311,6 +1071,30 @@ def _assemble_chapter_audio(user_id: str, book_id: str, chapter_id: int) -> Path
     line_ids = [t["line_id"] for t in chapter_lines]
     if not all(lid in done for lid in line_ids):
         return None
+
+    # assemblyId для главы по ordered taskId'ов
+    def _line_sort_key(t: dict) -> tuple:
+        if t.get("is_segment") and t.get("base_line_id") is not None and t.get("segment_index") is not None:
+            return (int(t.get("base_line_id")), int(t.get("segment_index")))
+        return (int(t.get("line_id")), 0)
+
+    chapter_lines_selected = list(chapter_lines)
+    chapter_lines_selected.sort(key=_line_sort_key)
+    ordered_task_ids: list[str] = []
+    for t in chapter_lines_selected:
+        tid = t.get("task_id")
+        if isinstance(tid, str) and tid.strip():
+            ordered_task_ids.append(tid)
+        else:
+            ordered_task_ids.append(f"{book_id}_{int(t.get('line_id'))}")
+
+    assembly_type = "book_chapter_wav"
+    assembly_id = _make_assembly_id(
+        artifact_type=assembly_type,
+        client_id=user_id,
+        book_id=book_id,
+        ordered_task_ids=ordered_task_ids,
+    )
     book_dir = STORAGE_ROOT / "books" / user_id / book_id
     chapters_dir = book_dir / "chapters"
     chapters_dir.mkdir(parents=True, exist_ok=True)
@@ -319,6 +1103,38 @@ def _assemble_chapter_audio(user_id: str, book_id: str, chapter_id: int) -> Path
     if not ubf.lines:
         return None
     Stage5Assembler().process(ubf, out_file)
+
+    try:
+        s3_key = f"stage5/assemblies/{user_id}/{assembly_id}/chapter_{chapter_id:03d}.wav"
+        duration_ms = _wav_duration_ms(out_file)
+        uploaded = _s3_upload_file(local_path=out_file, s3_key=s3_key)
+        if uploaded:
+            _task_registry_upsert_assembly(
+                assembly_id=assembly_id,
+                client_id=user_id,
+                book_id=book_id,
+                artifact_type=assembly_type,
+                chapter_id=chapter_id,
+                storage_key=s3_key,
+                duration_ms=duration_ms,
+            )
+    except Exception:
+        pass
+    try:
+        _log.info(
+            "stage5_assemble chapter OK clientId=%s bookId=%s chapterId=%s assemblyId=%s uploaded=%s durationMs=%s storageKey=%s tasks=%s",
+            user_id,
+            book_id,
+            chapter_id,
+            assembly_id,
+            uploaded if "uploaded" in locals() else False,
+            duration_ms if "duration_ms" in locals() else None,
+            s3_key if "uploaded" in locals() and uploaded else None,
+            ",".join(ordered_task_ids),
+        )
+    except Exception:
+        pass
+
     return out_file
 
 
@@ -377,15 +1193,31 @@ def list_books(
         fp = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
         if state:
             total = len(state.get("lines") or [])
-            if total and len(state.get("done") or {}) >= total:
+            done_count = len(state.get("done") or {})
+            if total and done_count >= total:
                 status = "done"
-            elif state.get("pending"):
+            elif total and done_count < total:
                 status = "processing"
         # final.wav на диске — показываем даже при потере state (перезапуск Core)
         if fp.exists():
             final_audio_path = str(fp)
             if status == "uploaded":
                 status = "done"
+        # После рестарта: если локально нет final.wav, проверяем assembly в TaskRegistry.
+        if not final_audio_path:
+            final_storage_key = _task_registry_get_final_assembly_storage_key(client_id=user_id, book_id=book_id)
+            if isinstance(final_storage_key, str) and final_storage_key:
+                final_audio_path = final_storage_key
+                if status == "uploaded":
+                    status = "done"
+            elif not state:
+                tasks = _task_registry_list_tasks(client_id=user_id, book_id=book_id)
+                total_tasks = len(tasks)
+                done_tasks = sum(1 for t in tasks if t.get("status") == "done")
+                if total_tasks and done_tasks >= total_tasks:
+                    status = "done"
+                elif total_tasks and done_tasks < total_tasks:
+                    status = "processing"
         book_dir = STORAGE_ROOT / "books" / user_id / book_id
         result.append({
             "id": book_id,
@@ -438,14 +1270,31 @@ def get_book(
     final_path = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
     if state:
         total_lines = len(state.get("lines") or [])
-        if total_lines and len(state.get("done") or {}) >= total_lines:
+        done_count = len(state.get("done") or {})
+        if total_lines and done_count >= total_lines:
             status = "done"
-        elif state.get("pending"):
+        elif total_lines and done_count < total_lines:
             status = "processing"
     if final_path.exists():
         final_audio_path = str(final_path)
         if status == "uploaded":
             status = "done"
+
+    # После рестарта: если локально нет final.wav, смотрим в TaskRegistry.
+    if not final_audio_path:
+        final_storage_key = _task_registry_get_final_assembly_storage_key(client_id=user_id, book_id=book_id)
+        if isinstance(final_storage_key, str) and final_storage_key:
+            final_audio_path = final_storage_key
+            if status == "uploaded":
+                status = "done"
+        elif not state:
+            tasks = _task_registry_list_tasks(client_id=user_id, book_id=book_id)
+            total_tasks = len(tasks)
+            done_tasks = sum(1 for t in tasks if t.get("status") == "done")
+            if total_tasks and done_tasks >= total_tasks:
+                status = "done"
+            elif total_tasks and done_tasks < total_tasks:
+                status = "processing"
     book_dir = STORAGE_ROOT / "books" / user_id / book_id
     return {
         "id": book_id,
@@ -469,14 +1318,47 @@ def get_book_status(
     with _lock:
         state = _book_states.get(key)
     if not state:
-        return {"stage": "idle", "progress": 0, "total_lines": 0, "tts_done": 0, "chapters_ready": []}
+        tasks = _task_registry_list_tasks(client_id=user_id, book_id=book_id)
+        total_tasks = len(tasks)
+        tts_done = sum(1 for t in tasks if t.get("status") == "done")
+        if not total_tasks:
+            return {"stage": "idle", "progress": 0, "total_lines": 0, "tts_done": 0, "chapters_ready": []}
+        progress = int(100 * tts_done / total_tasks) if total_tasks else 0
+        if total_tasks and tts_done < total_tasks and tts_done > 0:
+            stage = "processing"
+        elif total_tasks and tts_done >= total_tasks:
+            stage = "done"
+        else:
+            stage = "idle"
+        chapter_totals: dict[int, int] = defaultdict(int)
+        chapter_done: dict[int, int] = defaultdict(int)
+        for t in tasks:
+            ch = t.get("chapterId") or t.get("chapter_id") or 1
+            if not isinstance(ch, int):
+                try:
+                    ch = int(ch)
+                except Exception:
+                    ch = 1
+            chapter_totals[ch] += 1
+            if t.get("status") == "done":
+                chapter_done[ch] += 1
+        chapters_ready = [
+            ch for ch in sorted(chapter_totals)
+            if chapter_totals.get(ch, 0) > 0 and chapter_done.get(ch, 0) >= chapter_totals.get(ch, 0)
+        ]
+        return {
+            "stage": stage,
+            "progress": progress,
+            "total_lines": total_tasks,
+            "tts_done": tts_done,
+            "chapters_ready": chapters_ready,
+        }
     lines = state.get("lines") or []
     done = state.get("done") or {}
     total = len(lines)
     tts_done = len(done)
     progress = int(100 * tts_done / total) if total else 0
-    has_pending = bool(state.get("pending"))
-    if has_pending:
+    if total and tts_done < total:
         stage = "processing"
     elif tts_done > 0:
         # Очередь пуста, но есть хотя бы одна готовая строка — считаем, что сборка завершена (даже если часть строк не озвучена).
@@ -514,18 +1396,42 @@ def get_book_chapter_audio(
     book_dir = STORAGE_ROOT / "books" / user_id / book_id
     chapters_dir = book_dir / "chapters"
     chapter_file = chapters_dir / f"chapter_{chapter_num:03d}.wav"
+
+    # Pref: отдаём из S3 по storageKey (без зависимости от локального диска Core).
+    storage_key = _task_registry_get_chapter_assembly_storage_key(
+        client_id=user_id,
+        book_id=book_id,
+        chapter_id=chapter_num,
+    )
+    if storage_key:
+        url = _s3_generate_presigned_url(storage_key)
+        if url:
+            return RedirectResponse(url)
+
+    path = _assemble_chapter_audio(user_id, book_id, chapter_num)
+    if path and path.exists():
+        # Lazy-assembly уже должна записать assembly в TaskRegistry/S3.
+        storage_key2 = _task_registry_get_chapter_assembly_storage_key(
+            client_id=user_id,
+            book_id=book_id,
+            chapter_id=chapter_num,
+        )
+        if storage_key2:
+            url2 = _s3_generate_presigned_url(storage_key2)
+            if url2:
+                return RedirectResponse(url2)
+        return FileResponse(
+            path,
+            media_type="audio/wav",
+            filename=path.name,
+        )
+
+    # Fallback: локальный файл существует, но storageKey не найден/не доступен.
     if chapter_file.exists():
         return FileResponse(
             chapter_file,
             media_type="audio/wav",
             filename=chapter_file.name,
-        )
-    path = _assemble_chapter_audio(user_id, book_id, chapter_num)
-    if path and path.exists():
-        return FileResponse(
-            path,
-            media_type="audio/wav",
-            filename=path.name,
         )
     raise HTTPException(status_code=404, detail="Chapter not ready or not found")
 
@@ -539,20 +1445,123 @@ def download_book_audio(
     user_id = (x_user_id or "").strip() or "anonymous"
     if not _book_dir(user_id, book_id):
         raise HTTPException(status_code=404, detail="Book not found")
+
+    final_path = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
+
+    # Pref: отдаём из S3 по storageKey (без зависимости от локального диска Core).
+    storage_key = _task_registry_get_final_assembly_storage_key(client_id=user_id, book_id=book_id)
+    if storage_key:
+        url = _s3_generate_presigned_url(storage_key)
+        if url:
+            return RedirectResponse(url)
+
+    # Если state потерян после рестарта, но локальный файл уже собран — fallback.
+    if final_path.exists():
+        return FileResponse(
+            final_path,
+            media_type="audio/wav",
+            filename=f"{book_id}.wav",
+        )
+
+    # Fallback: пробуем собрать (создаст S3 upload + assembly metadata).
     path = _assemble_final_audio(user_id, book_id)
-    if not path or not path.exists():
-        # Fallback: если state потерян (перезапуск Core), отдаём существующий final.wav
-        path = STORAGE_ROOT / "books" / user_id / book_id / "final.wav"
     if not path or not path.exists():
         raise HTTPException(
             status_code=404,
             detail="Audio not ready. Finish narration and ensure all lines are done.",
         )
+
+    # Lazy-assembly уже должна записать assembly в TaskRegistry/S3.
+    storage_key2 = _task_registry_get_final_assembly_storage_key(client_id=user_id, book_id=book_id)
+    if storage_key2:
+        url2 = _s3_generate_presigned_url(storage_key2)
+        if url2:
+            return RedirectResponse(url2)
+
+    # Final fallback: локальный файл существует, но storageKey не найден/не доступен.
     return FileResponse(
         path,
         media_type="audio/wav",
         filename=f"{book_id}.wav",
     )
+
+
+# --- Роутер для /tasks и /artifacts ---
+tasks_router = APIRouter()
+
+
+@tasks_router.get("/tasks/{task_id}")
+def get_task_status(
+    task_id: str,
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+):
+    """GET /tasks/{taskId} — статус и метаданные RenderTask (SoT в Postgres через TaskRegistry)."""
+    data = _task_registry_get_task(task_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task = data.get("task") if isinstance(data, dict) else None
+    if not isinstance(task, dict):
+        # fallback: если формат ответа изменится
+        task = data
+
+    requested_client_id = (x_user_id or "").strip()
+    if requested_client_id and isinstance(task.get("clientId"), str):
+        if task.get("clientId") != requested_client_id:
+            raise HTTPException(status_code=403, detail="clientId mismatch")
+
+    return {
+        "taskId": task.get("taskId") or task_id,
+        "status": task.get("status"),
+        "clientId": task.get("clientId"),
+        "bookId": task.get("bookId"),
+        "lineId": task.get("lineId"),
+        "engine": task.get("engine"),
+        "storageKey": task.get("storageKey"),
+        "durationMs": task.get("durationMs"),
+        "errorMessage": task.get("errorMessage"),
+        "createdAt": str(task.get("createdAt")) if task.get("createdAt") is not None else None,
+        "updatedAt": str(task.get("updatedAt")) if task.get("updatedAt") is not None else None,
+    }
+
+
+@tasks_router.get("/artifacts/{task_id}")
+def get_task_artifact(
+    task_id: str,
+    x_user_id: str | None = Header(None, alias="X-User-Id"),
+):
+    """GET /artifacts/{taskId} — WAV артифакт из storageKey (as-is локальный storage)."""
+    data = _task_registry_get_task(task_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task = data.get("task") if isinstance(data, dict) else None
+    if not isinstance(task, dict):
+        task = data
+
+    requested_client_id = (x_user_id or "").strip()
+    if requested_client_id and isinstance(task.get("clientId"), str):
+        if task.get("clientId") != requested_client_id:
+            raise HTTPException(status_code=403, detail="clientId mismatch")
+
+    storage_key = task.get("storageKey")
+    if not isinstance(storage_key, str) or not storage_key:
+        raise HTTPException(status_code=404, detail="Artifact not ready")
+
+    path = _safe_resolve_storage_path(storage_key)
+    if path and path.exists() and path.is_file():
+        return FileResponse(
+            path,
+            media_type="audio/wav",
+            filename=Path(storage_key).name,
+        )
+
+    # Если storageKey — это S3 key, отдадим signed URL (MinIO).
+    url = _s3_generate_presigned_url(storage_key)
+    if url:
+        return RedirectResponse(url)
+
+    raise HTTPException(status_code=404, detail="Artifact not found")
 
 
 # --- Роутер для /internal ---
@@ -895,9 +1904,24 @@ def _process_book_stage4_post_stage3(
                         audio_config["split_sentences"] = False
             # Чтобы сохранить порядок, делаем новый line_id для частей: base*1000 + part_index
             line_id = line.idx * 1000 + pi if len(parts) > 1 else line.idx
+            is_segment = len(parts) > 1
+            segment_index = pi if is_segment else None
+            segment_total = len(parts) if is_segment else None
+            base_line_id = line.idx if is_segment else None
+            task_id = _make_render_task_id(
+                client_id=user_id,
+                book_id=book_id,
+                line_id=line_id,
+                text=part.strip(),
+                voice=voice_for_tts,
+                emotion=emotion_for_tts,
+                audio_config=audio_config if audio_config else None,
+                tts_engine=tts_engine,
+            )
             lines_data.append({
                 "line_id": line_id,
                 "text": part.strip(),
+                "task_id": task_id,
                 "voice": voice_for_tts,
                 "role": role,
                 "emotion": emotion_for_tts,
@@ -907,6 +1931,10 @@ def _process_book_stage4_post_stage3(
                 "speaker_wav_path": speaker_wav_path,
                 "is_chapter_header": getattr(line, "is_chapter_header", False) and pi == 1,
                 "type": line.type or "narrator",
+                "is_segment": is_segment,
+                "segment_index": segment_index,
+                "segment_total": segment_total,
+                "base_line_id": base_line_id,
             })
 
     _log.info(
@@ -938,6 +1966,101 @@ def _process_book_stage4_post_stage3(
             pending_ids.append(line_id)
     pending = deque(pending_ids)
     _log.info("process-book-stage4: reuse check done → done=%s pending=%s", len(done), len(pending_ids))
+
+    # TaskRegistry: mark reused lines as DONE and remaining as QUEUED.
+    # На MVP это делается синхронно в рамках потока подготовки задач.
+    if _TASK_REGISTRY_API_URL:
+        task_meta_by_line_id: dict[int, dict] = {}
+        for t in lines_data:
+            lid = t.get("line_id")
+            tid = t.get("task_id")
+            if lid is None or not tid:
+                continue
+            task_meta_by_line_id[lid] = {
+                "task_id": tid,
+                "chapter_id": t.get("chapter_id") or 1,
+                "speaker": t.get("voice"),
+                "line_type": t.get("type"),
+                "emotion": t.get("emotion") or {},
+                "is_chapter_header": bool(t.get("is_chapter_header")),
+                "is_segment": bool(t.get("is_segment")),
+                "segment_index": t.get("segment_index"),
+                "segment_total": t.get("segment_total"),
+                "base_line_id": t.get("base_line_id"),
+            }
+
+        # Для reused строк тоже нужно сохранить speaker/type/emotion в TaskRegistry,
+        # иначе Core не сможет собрать Stage5 после рестарта.
+        for lid in done.keys():
+            meta = task_meta_by_line_id.get(lid)
+            if meta:
+                _task_registry_upsert_queued(
+                    task_id=meta["task_id"],
+                    client_id=user_id,
+                    book_id=book_id,
+                    line_id=lid,
+                    chapter_id=meta.get("chapter_id"),
+                    speaker=meta.get("speaker"),
+                    line_type=meta.get("line_type"),
+                    emotion=meta.get("emotion") or {},
+                    is_chapter_header=meta.get("is_chapter_header"),
+                    is_segment=meta.get("is_segment"),
+                    segment_index=meta.get("segment_index"),
+                    segment_total=meta.get("segment_total"),
+                    base_line_id=meta.get("base_line_id"),
+                    engine=tts_engine,
+                )
+                _task_registry_complete(
+                    task_id=meta["task_id"],
+                    client_id=user_id,
+                    book_id=book_id,
+                    line_id=lid,
+                    chapter_id=meta.get("chapter_id"),
+                    storage_key=_uri_for_line(user_id, book_id, lid),
+                    duration_ms=None,
+                )
+
+        for lid in pending_ids:
+            meta = task_meta_by_line_id.get(lid)
+            if meta:
+                _task_registry_upsert_queued(
+                    task_id=meta["task_id"],
+                    client_id=user_id,
+                    book_id=book_id,
+                    line_id=lid,
+                    chapter_id=meta.get("chapter_id"),
+                    speaker=meta.get("speaker"),
+                    line_type=meta.get("line_type"),
+                    emotion=meta.get("emotion") or {},
+                    is_chapter_header=meta.get("is_chapter_header"),
+                    is_segment=meta.get("is_segment"),
+                    segment_index=meta.get("segment_index"),
+                    segment_total=meta.get("segment_total"),
+                    base_line_id=meta.get("base_line_id"),
+                    engine=tts_engine,
+                )
+
+    # Redis Stream enqueue для Stage4 worker
+    if _TTS_USE_REDIS_QUEUE and pending_ids:
+        pending_set = set(pending_ids)
+        for t in lines_data:
+            if t.get("line_id") not in pending_set:
+                continue
+            _publish_tts_task(
+                {
+                    "clientId": user_id,
+                    "taskId": t.get("task_id"),
+                    "bookId": book_id,
+                    "lineId": t.get("line_id"),
+                    "text": t.get("text"),
+                    "voice": t.get("voice"),
+                    "emotion": t.get("emotion") or {},
+                    "audio_config": t.get("audio_config"),
+                    "speaker_wav_path": t.get("speaker_wav_path"),
+                    "tts_engine": t.get("tts_engine", "qwen3"),
+                }
+            )
+
     _save_book_voice_config(book_dir, effective_voice_ids, tts_engine, speaker_settings)
     if pending:
         final_wav = book_dir / "final.wav"
@@ -959,7 +2082,7 @@ def _process_book_stage4_post_stage3(
             "tts_engine": tts_engine,
         }
         enqueued = False
-        if pending:
+        if pending and not _TTS_USE_REDIS_QUEUE:
             try:
                 _pending_books.remove(key)
             except ValueError:
@@ -1105,7 +2228,7 @@ def post_tts_next():
             if not task:
                 continue
             user_id, book_id = key
-            task_id = f"{book_id}_{line_id}"
+            task_id = task.get("task_id") or f"{book_id}_{line_id}"
             _last_leased = {"user_id": user_id, "book_id": book_id, "line_id": line_id}
             result = {
                 "task_id": task_id,
@@ -1158,7 +2281,7 @@ def post_tts_next_batch(count: int = 3):
             if not task:
                 continue
             user_id, book_id = key
-            task_id = f"{book_id}_{line_id}"
+            task_id = task.get("task_id") or f"{book_id}_{line_id}"
             first_voice = tasks[0].get("voice") if tasks else None
             if tasks and first_voice and task.get("voice") != first_voice:
                 pending.appendleft(line_id)
@@ -1209,11 +2332,32 @@ def post_tts_complete(body: dict = Body(default_factory=dict)):
         if not user_id or not book_id:
             raise HTTPException(status_code=400, detail="user_id and book_id required (or matching last tts-next)")
     key = (user_id, book_id)
+    should_assemble = False
+    chapter_ids: list[int] = []
     with _lock:
         state = _book_states.get(key)
         if not state:
             raise HTTPException(status_code=404, detail="Book state not found")
         state.setdefault("done", {})[line_id] = audio_path
+        lines = state.get("lines") or []
+        done_count = len(state.get("done") or {})
+        total = len(lines)
+        should_assemble = bool(total) and done_count >= total
+        chapter_ids = sorted({int(t.get("chapter_id") or 1) for t in lines if isinstance(t, dict)})
+
+    if should_assemble:
+        try:
+            _assemble_final_audio(user_id, book_id)
+            # Собираем главы, которые стали полностью готовы.
+            for ch in chapter_ids:
+                try:
+                    _assemble_chapter_audio(user_id, book_id, ch)
+                except Exception:
+                    # Не ломаем основной контракт /tts-complete.
+                    pass
+        except Exception:
+            pass
+
     return {"line_id": line_id, "audio_path": audio_path, "book_id": book_id}
 
 
@@ -1239,6 +2383,8 @@ def post_tts_complete_batch(body: dict = Body(default_factory=dict)):
         if not user_id or not book_id:
             raise HTTPException(status_code=400, detail="user_id and book_id required")
     key = (user_id, book_id)
+    should_assemble = False
+    chapter_ids: list[int] = []
     with _lock:
         state = _book_states.get(key)
         if not state:
@@ -1248,7 +2394,25 @@ def post_tts_complete_batch(body: dict = Body(default_factory=dict)):
             path = r.get("audio_path")
             if lid is not None and path:
                 state.setdefault("done", {})[lid] = path
+
+        lines = state.get("lines") or []
+        done_count = len(state.get("done") or {})
+        total = len(lines)
+        should_assemble = bool(total) and done_count >= total
+        chapter_ids = sorted({int(t.get("chapter_id") or 1) for t in lines if isinstance(t, dict)})
+
     _last_leased_batch = None
+    if should_assemble:
+        try:
+            _assemble_final_audio(user_id, book_id)
+            for ch in chapter_ids:
+                try:
+                    _assemble_chapter_audio(user_id, book_id, ch)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     return {"processed": len(results), "book_id": book_id}
 
 

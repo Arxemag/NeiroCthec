@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 logger = logging.getLogger("stage4")
 
 from stage4_service.schemas import TTSRequest, TTSResponse, TTSStatus
-from stage4_service.storage import LocalObjectStorage
+from stage4_service.storage import LocalObjectStorage, maybe_get_s3_storage
 import shutil
 from stage4_service.synth import ExternalHTTPSynthesizer, MockSynthesizer
 
@@ -51,9 +52,165 @@ def _synth_for_engine(tts_engine: str | None):
     e = (tts_engine or "qwen3").strip().lower()
     return _synthesizers.get(e) or _synthesizers["qwen3"]
 storage = LocalObjectStorage()
+s3_storage = maybe_get_s3_storage()
 # Без пробелов и без завершающего слэша, иначе получится /internal%20/tts-next и 404
 core_internal_url = (os.getenv("CORE_INTERNAL_URL", "http://core:8000/internal") or "").strip().rstrip("/")
-# Счётчик опросов с пустой очередью — раз в ~30 сек пишем в лог, что воркер жив и опрашивает core
+
+
+def _storage_key_for_task(*, user_id: str, book_id: str, line_id: int, task_id: str, local_audio_uri: str) -> str:
+    """
+    В target storageKey для артефактов адресуется по (clientId, taskId).
+    Для текущего пайплайна core assembly по-прежнему читает локальные files,
+    поэтому core /tts-complete получает local_audio_uri, а TaskRegistry — s3 key.
+    """
+    storage_key = local_audio_uri
+    if not s3_storage:
+        return storage_key
+    try:
+        key = s3_storage.key_for_task(user_id, task_id)
+        local_path = storage.path_for_line(user_id, book_id, line_id)
+        s3_storage.upload_file(key=key, file_path=local_path)
+        storage_key = key
+    except Exception as e:
+        logger.warning("S3 upload failed taskId=%s: %s", task_id, e)
+    return storage_key
+
+# TaskRegistry (NestJS) — опциональная интеграция
+_task_registry_api_url = (os.getenv("TASK_REGISTRY_API_URL") or "").strip().rstrip("/")
+_task_registry_internal_token = os.getenv("TASK_REGISTRY_INTERNAL_TOKEN") or ""
+_task_registry_headers: dict[str, str] = (
+    {"X-Internal-Token": _task_registry_internal_token} if _task_registry_internal_token else {}
+)
+
+
+def _task_registry_complete(*, task_id: str, storage_key: str, duration_ms: float | None = None) -> None:
+    if not _task_registry_api_url:
+        return
+    try:
+        payload: dict = {"storageKey": storage_key}
+        if duration_ms is not None:
+            payload["durationMs"] = duration_ms
+        requests.post(
+            f"{_task_registry_api_url}/internal/task-registry/tasks/{task_id}/complete",
+            json=payload,
+            headers=_task_registry_headers,
+            timeout=10,
+        ).raise_for_status()
+    except Exception as e:
+        logger.warning("TaskRegistry complete failed taskId=%s: %s", task_id, e)
+
+
+def _task_registry_fail(*, task_id: str, error_message: str) -> None:
+    if not _task_registry_api_url:
+        return
+    try:
+        requests.post(
+            f"{_task_registry_api_url}/internal/task-registry/tasks/{task_id}/fail",
+            json={"errorMessage": error_message},
+            headers=_task_registry_headers,
+            timeout=10,
+        ).raise_for_status()
+    except Exception as e:
+        logger.warning("TaskRegistry fail failed taskId=%s: %s", task_id, e)
+
+# Redis Stream queue mode (Core → Stage4)
+_TTS_USE_REDIS_QUEUE = os.getenv("TTS_USE_REDIS_QUEUE", "").strip().lower() in {"1", "true", "yes", "on"}
+_TTS_RENDER_STREAM = (os.getenv("TTS_RENDER_STREAM") or "tts.render.v1").strip()
+_TTS_REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
+_TTS_STAGE4_CONSUMER_GROUP = (os.getenv("TTS_STAGE4_CONSUMER_GROUP") or "stage4_worker").strip()
+_TTS_STAGE4_CONSUMER_NAME = (os.getenv("TTS_STAGE4_CONSUMER_NAME") or "stage4_1").strip()
+_TTS_DLQ_STREAM = (os.getenv("TTS_DLQ_STREAM") or f"{_TTS_RENDER_STREAM}.dlq").strip()
+
+_redis_client = None
+_redis_lock = threading.Lock()
+_consumer_group_ready = False
+
+
+def _get_redis_client():
+    global _redis_client, _consumer_group_ready
+    if not _TTS_USE_REDIS_QUEUE:
+        return None
+    if not _TTS_REDIS_URL:
+        return None
+    with _redis_lock:
+        if _redis_client is None:
+            try:
+                import redis  # type: ignore
+
+                _redis_client = redis.Redis.from_url(_TTS_REDIS_URL)
+            except Exception as e:
+                logger.warning("Redis client init failed: %s", e)
+                _redis_client = None
+                _consumer_group_ready = False
+    return _redis_client
+
+
+def _ensure_consumer_group(r) -> None:
+    global _consumer_group_ready
+    if _consumer_group_ready or not r:
+        return
+    try:
+        # id='$' и mkstream=True — создаст стрим, если его ещё нет, и не переобработает старые сообщения
+        r.xgroup_create(_TTS_RENDER_STREAM, _TTS_STAGE4_CONSUMER_GROUP, id="$", mkstream=True)
+    except Exception as e:
+        # BUSYGROUP — нормальная ситуация (уже создана группа)
+        msg = str(e).lower()
+        if "busygrou" not in msg:
+            logger.warning("Redis xgroup_create failed: %s", e)
+    _consumer_group_ready = True
+
+
+def _publish_to_dlq(*, msg_id: str | None, payload: dict, error_message: str) -> None:
+    """Отправляет проблемное сообщение в DLQ stream для последующего анализа/replay."""
+    r = _get_redis_client()
+    if not r:
+        return
+    try:
+        safe_payload_json = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        fields: dict[str, str] = {
+            "payload": safe_payload_json,
+            "errorMessage": str(error_message or "unknown"),
+        }
+        if msg_id:
+            fields["sourceMsgId"] = str(msg_id)
+        r.xadd(_TTS_DLQ_STREAM, fields)
+    except Exception as e:
+        logger.warning("DLQ xadd failed: %s", e)
+
+
+def _read_one_task_from_stream(timeout_ms: int = 1000) -> tuple[str, dict] | None:
+    """Возвращает (message_id, task_payload) или None если нет сообщений."""
+    r = _get_redis_client()
+    if not r:
+        return None
+    _ensure_consumer_group(r)
+    try:
+        res = r.xreadgroup(
+            _TTS_STAGE4_CONSUMER_GROUP,
+            _TTS_STAGE4_CONSUMER_NAME,
+            {_TTS_RENDER_STREAM: ">"},
+            count=1,
+            block=timeout_ms,
+        )
+    except Exception as e:
+        logger.warning("Redis xreadgroup failed: %s", e)
+        return None
+    if not res:
+        return None
+    # res: [(stream_name, [(msg_id, {field: value})...])]
+    _, entries = res[0]
+    if not entries:
+        return None
+    msg_id, fields = entries[0]
+    raw_payload = fields.get("payload") or fields.get(b"payload")
+    if isinstance(raw_payload, bytes):
+        raw_payload = raw_payload.decode("utf-8", errors="replace")
+    if not isinstance(raw_payload, str):
+        return None
+    task_payload = json.loads(raw_payload)
+    return str(msg_id), task_payload
+
+# Счётчик опросов с пустой очередью — раз в ~30 сек пишем в лог
 _empty_poll_count = 0
 
 
@@ -241,6 +398,145 @@ def process_next_task():
 
 def _process_one_task() -> bool:
     """Забрать задачу(и) из core, озвучить, отправить tts-complete. Возвращает True если была задача."""
+    if _TTS_USE_REDIS_QUEUE:
+        msg = _read_one_task_from_stream(timeout_ms=2000)
+        if not msg:
+            return False
+        msg_id, task = msg
+        t0 = time.monotonic()
+
+        client_id = task.get("clientId") or ""
+        book_id = task.get("bookId") or ""
+        line_id = task.get("lineId")
+        task_id = task.get("taskId") or ""
+        text = task.get("text") or ""
+        voice = task.get("voice") or "narrator"
+
+        if not (client_id and book_id and isinstance(line_id, int) and task_id and text.strip()):
+            logger.warning("Invalid task payload from stream: %s", task)
+            r = _get_redis_client()
+            if r:
+                try:
+                    r.xack(_TTS_RENDER_STREAM, _TTS_STAGE4_CONSUMER_GROUP, msg_id)
+                except Exception:
+                    pass
+            return True
+
+        req = TTSRequest(
+            task_id=task_id,
+            user_id=client_id,
+            book_id=book_id,
+            line_id=line_id,
+            text=text,
+            speaker=voice,
+            emotion=task.get("emotion"),
+            audio_config=task.get("audio_config"),
+            speaker_wav_path=task.get("speaker_wav_path"),
+            tts_engine=task.get("tts_engine", "qwen3"),
+        )
+
+        result = tts(req)
+
+        # При 503 (модель ещё грузится) повторяем запрос несколько раз с паузой
+        retry_on_503 = int(os.getenv("STAGE4_TTS_503_RETRIES", "5"))
+        retry_delay_sec = int(os.getenv("STAGE4_TTS_503_RETRY_DELAY_SEC", "20"))
+        for _ in range(retry_on_503 - 1):
+            if result.status == TTSStatus.DONE:
+                break
+            err = result.error or ""
+            if "503" not in err and "Service Unavailable" not in err:
+                break
+            logger.info(
+                "TTS 503 (model loading?), retry in %ss book_id=%s line_id=%s",
+                retry_delay_sec,
+                req.book_id,
+                req.line_id,
+            )
+            time.sleep(retry_delay_sec)
+            result = tts(req)
+
+        if result.status != TTSStatus.DONE:
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            logger.error(
+                "TTS failed (stream) taskId=%s clientId=%s book_id=%s line_id=%s engine=%s latencyMs=%s durationMs=%s: %s",
+                req.task_id,
+                client_id,
+                req.book_id,
+                req.line_id,
+                getattr(req, "tts_engine", "qwen3"),
+                elapsed_ms,
+                result.duration_ms,
+                result.error or "unknown",
+            )
+            _task_registry_fail(task_id=req.task_id, error_message=result.error or "tts_failed")
+            _publish_to_dlq(
+                msg_id=msg_id,
+                payload=task,
+                error_message=result.error or "tts_failed",
+            )
+            r = _get_redis_client()
+            if r:
+                try:
+                    r.xack(_TTS_RENDER_STREAM, _TTS_STAGE4_CONSUMER_GROUP, msg_id)
+                except Exception:
+                    pass
+            return True
+
+        # TaskRegistry + Core завершение задачи
+        local_audio_uri = result.audio_uri or ""
+        task_storage_key = _storage_key_for_task(
+            user_id=client_id,
+            book_id=book_id,
+            line_id=line_id,
+            task_id=req.task_id,
+            local_audio_uri=local_audio_uri,
+        )
+        _task_registry_complete(
+            task_id=req.task_id,
+            storage_key=task_storage_key,
+            duration_ms=result.duration_ms,
+        )
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        try:
+            wav_path = storage.path_for_line(client_id, book_id, line_id)
+            wav_bytes = wav_path.stat().st_size if wav_path.exists() else None
+        except Exception:
+            wav_bytes = None
+        logger.info(
+            "stage4 stream OK taskId=%s clientId=%s bookId=%s lineId=%s engine=%s latencyMs=%s bytes=%s durationMs=%s storageKey=%s",
+            req.task_id,
+            client_id,
+            book_id,
+            line_id,
+            getattr(req, "tts_engine", "qwen3"),
+            elapsed_ms,
+            wav_bytes,
+            result.duration_ms,
+            task_storage_key,
+        )
+        try:
+            requests.post(
+                f"{core_internal_url}/tts-complete",
+                json={
+                    "user_id": client_id,
+                    "book_id": book_id,
+                    "line_id": line_id,
+                    "audio_path": local_audio_uri,
+                },
+                timeout=20,
+            ).raise_for_status()
+        except Exception as e:
+            logger.warning("core /tts-complete failed; keep stream msg unacked: %s", e)
+            return True
+
+        r = _get_redis_client()
+        if r:
+            try:
+                r.xack(_TTS_RENDER_STREAM, _TTS_STAGE4_CONSUMER_GROUP, msg_id)
+            except Exception:
+                pass
+        return True
+
     batch_size = int(os.getenv("STAGE4_BATCH_SIZE", "1"))
     if batch_size > 1:
         return _process_batch_tasks(batch_size)
@@ -291,15 +587,29 @@ def _process_one_task() -> bool:
             "TTS failed book_id=%s line_id=%s engine=%s: %s",
             req.book_id, req.line_id, getattr(req, "tts_engine", "qwen3"), result.error or "unknown",
         )
+        _task_registry_fail(task_id=req.task_id, error_message=result.error or "tts_failed")
         return True  # уже забрали задачу, но не смогли — не повторяем бесконечно
     try:
+        local_audio_uri = result.audio_uri or ""
+        task_storage_key = _storage_key_for_task(
+            user_id=task["user_id"],
+            book_id=task["book_id"],
+            line_id=task["line_id"],
+            task_id=req.task_id,
+            local_audio_uri=local_audio_uri,
+        )
+        _task_registry_complete(
+            task_id=req.task_id,
+            storage_key=task_storage_key,
+            duration_ms=result.duration_ms,
+        )
         requests.post(
             f"{core_internal_url}/tts-complete",
             json={
                 "user_id": task["user_id"],
                 "book_id": task["book_id"],
                 "line_id": task["line_id"],
-                "audio_path": result.audio_uri,
+                "audio_path": local_audio_uri,
             },
             timeout=20,
         ).raise_for_status()
@@ -349,16 +659,33 @@ def _process_batch_tasks(batch_size: int) -> bool:
     try:
         batch_results = synth.synthesize_batch(reqs)
     except Exception:
+        for t in tasks:
+            try:
+                _task_registry_fail(task_id=t["task_id"], error_message="tts_batch_failed")
+            except Exception:
+                pass
         return True  # задачи уже забраны
     if len(batch_results) != len(tasks):
         return True
     results = []
-    for (t, (audio_bytes, _)) in zip(tasks, batch_results):
+    for (t, (audio_bytes, dur_ms)) in zip(tasks, batch_results):
         target = storage.path_for_line(t["user_id"], t["book_id"], t["line_id"])
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(audio_bytes)
         audio_uri = storage.uri_for_line(t["user_id"], t["book_id"], t["line_id"])
         results.append({"line_id": t["line_id"], "audio_path": audio_uri})
+        task_storage_key = _storage_key_for_task(
+            user_id=t["user_id"],
+            book_id=t["book_id"],
+            line_id=t["line_id"],
+            task_id=t["task_id"],
+            local_audio_uri=audio_uri or "",
+        )
+        _task_registry_complete(
+            task_id=t["task_id"],
+            storage_key=task_storage_key,
+            duration_ms=dur_ms,
+        )
     try:
         requests.post(
             f"{core_internal_url}/tts-complete-batch",

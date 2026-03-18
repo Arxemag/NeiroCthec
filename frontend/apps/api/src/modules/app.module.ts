@@ -12,6 +12,8 @@ import { HealthModule } from './health/health.module';
 import { StorageModule } from './storage/storage.module';
 import { JobsModule } from './jobs/jobs.module';
 import { AdminModule } from './admin/admin.module';
+import { TaskRegistryModule } from './task-registry/task-registry.module';
+import { TasksProxyModule } from './tasks-proxy/tasks-proxy.module';
 
 @Module({
   imports: [
@@ -19,6 +21,8 @@ import { AdminModule } from './admin/admin.module';
     PrismaModule,
     StorageModule,
     JobsModule,
+    TaskRegistryModule,
+    TasksProxyModule,
     AuthModule,
     UsersModule,
     VoicesModule,

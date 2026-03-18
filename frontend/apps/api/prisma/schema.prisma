@@ -34,6 +34,19 @@ enum AudioStatus {
   error
 }
 
+enum RenderTaskStatus {
+  queued
+  running
+  done
+  failed
+  cancelled
+}
+
+enum RenderAssemblyType {
+  book_final_wav
+  book_chapter_wav
+}
+
 enum VoiceGender {
   male
   female
@@ -178,6 +191,60 @@ model Audio {
 
   @@index([projectId])
   @@index([userId])
+}
+
+model RenderTask {
+  /** Детерминированный идентификатор рендера (clientId + taskId в терминах ТЗ). */
+  taskId       String            @id
+  clientId     String
+  bookId       String
+  lineId       Int
+  /** Номер главы (1..N), чтобы Core мог вычислять `chapters_ready` после рестарта. */
+  chapterId    Int?
+  /** Persisted speech structure for Stage5 assembly after restarts. */
+  speaker      String?
+  lineType     String?
+  emotion      Json?
+  isChapterHeader Boolean?
+  isSegment    Boolean?
+  segmentIndex Int?
+  segmentTotal Int?
+  baseLineId   Int?
+  engine       String
+
+  status       RenderTaskStatus @default(queued)
+  storageKey   String?
+  durationMs   Int?
+  errorMessage String?
+
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([clientId, bookId])
+  @@index([status])
+}
+
+model RenderAssembly {
+  /**
+   * Детерминированный assemblyId (hash inputs), для идемпотентности.
+   * На target: либо assemblyId hash, либо отдельная сущность — мы делаем hash.
+   */
+  assemblyId   String             @id
+  clientId     String
+  bookId       String
+  type         RenderAssemblyType
+  /** Для `book_chapter_wav`: номер главы (1..N). Для `book_final_wav`: 0. */
+  chapterId    Int                @default(0)
+
+  storageKey   String
+  durationMs   Int?
+  errorMessage String?
+
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@unique([clientId, bookId, type, chapterId])
+  @@index([clientId, bookId, type])
 }
 
 model Plan {
