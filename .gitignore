@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+**/node_modules/
 
 # Build / cache
 .next/
@@ -15,6 +16,7 @@ out/
 # Logs
 *.log
 npm-debug.log*
+app/*.log
 
 # OS
 .DS_Store
@@ -23,8 +25,20 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+app/.venv/
+app/.venv*/
+
+# Runtime artifacts
+app/storage/
 
 # Prisma
 apps/api/prisma/migrations/**/migration_lock.toml
