@@ -1,0 +1,35 @@
+{
+  "voices": [
+    {
+      "id": "voice-1",
+      "name": "Мужской голос 1",
+      "description": "Глубокий мужской голос, подходит для драматических произведений",
+      "gender": "male",
+      "ageRange": "adult",
+      "language": "ru",
+      "audioFile": "/cache/voices/audio/voice-1-sample.mp3",
+      "previewText": "Привет, это пример голоса актера",
+      "tags": ["драма", "мужской", "глубокий"],
+      "createdAt": "2026-02-12T00:00:00Z",
+      "updatedAt": "2026-02-12T00:00:00Z"
+    },
+    {
+      "id": "voice-2",
+      "name": "Женский голос 1",
+      "description": "Мягкий женский голос, идеален для романтических произведений",
+      "gender": "female",
+      "ageRange": "adult",
+      "language": "ru",
+      "audioFile": "/cache/voices/audio/voice-2-sample.mp3",
+      "previewText": "Здравствуйте, это пример женского голоса",
+      "tags": ["романтика", "женский", "мягкий"],
+      "createdAt": "2026-02-12T00:00:00Z",
+      "updatedAt": "2026-02-12T00:00:00Z"
+    }
+  ],
+  "metadata": {
+    "version": "1.0.0",
+    "lastSync": "2026-02-12T00:00:00Z",
+    "totalVoices": 2
+  }
+}

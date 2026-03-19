@@ -1,0 +1,61 @@
+# Core API и TTS в Docker. Запуск: из папки app/ выполнить docker compose up -d [core] [tts]
+version: '3.8'
+
+services:
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    ports:
+      - "8000:8000"
+      - "5678:5678"
+    volumes:
+      # Монтируем весь код для hot-reload в dev
+      - ./:/app
+      # Хранилище книг/аудио (общий том со stage4 и tts)
+      - ./storage:/app/storage
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  stage4:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    depends_on:
+      - core
+    environment:
+      # Core API внутри общей сети compose
+      - CORE_INTERNAL_URL=http://core:8000/internal
+      - STAGE4_SYNTH_MODE=external
+      # По умолчанию — локальный TTS Qwen3 на хосте (AMD)
+      - EXTERNAL_TTS_URL=http://host.docker.internal:8020
+      - STAGE4_BATCH_SIZE=5
+    volumes:
+      - ./:/app
+      - ./storage:/app/storage
+    command: ["python", "-m", "stage4_service.app"]
+
+  tts:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    runtime: nvidia
+    ports:
+      - "8020:8020"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TTS_ENGINE_PORT=8020
+    volumes:
+      - ./storage:/app/storage
+      - tts_cache:/root/.cache/tts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  tts_cache:

@@ -1,0 +1,315 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  user
+  admin
+}
+
+enum SubscriptionStatus {
+  free
+  trial
+  active
+  expired
+}
+
+enum ProjectStatus {
+  draft
+  queued
+  processing
+  ready
+  error
+}
+
+enum AudioStatus {
+  queued
+  processing
+  ready
+  error
+}
+
+enum RenderTaskStatus {
+  queued
+  running
+  done
+  failed
+  cancelled
+}
+
+enum RenderAssemblyType {
+  book_final_wav
+  book_chapter_wav
+}
+
+enum VoiceGender {
+  male
+  female
+  neutral
+}
+
+enum VoiceRole {
+  narrator  // Диктор
+  actor     // Актер (для мужских и женских голосов)
+}
+
+model User {
+  id                 String             @id @default(cuid())
+  email              String             @unique
+  passwordHash       String
+  role               UserRole           @default(user)
+  subscriptionStatus SubscriptionStatus @default(free)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  projects           Project[]
+  audios             Audio[]
+  refreshTokens      RefreshToken[]
+  subscription       Subscription?
+  books              Book[]
+  bookSeries         BookSeries[]
+  userVoices        UserVoice[]
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String
+  revokedAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Project {
+  id              String        @id @default(cuid())
+  userId          String
+  title           String
+  text            String
+  language        String
+  status          ProjectStatus @default(draft)
+  errorMessage    String?
+  speakerSettings Json?         // { narrator?, male?, female?: { tempo?: number, pitch?: number } }
+  deletedAt       DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  voices        ProjectVoice[]
+  audios       Audio[]
+  voiceSettings ProjectVoiceSettings?
+  userVoices   UserVoice[]
+
+  @@index([userId])
+}
+
+model UserVoice {
+  id          String    @id @default(cuid())
+  userId      String
+  name        String
+  coreVoiceId String    // ID голоса в Core (встроенный или загруженный пользователем)
+  projectId   String?   // опционально: привязка к проекту
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([projectId])
+}
+
+model ProjectVoiceSettings {
+  id              String  @id @default(cuid())
+  projectId       String  @unique
+  narratorVoiceId String?
+  maleVoiceId     String?
+  femaleVoiceId   String?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model Voice {
+  id                  String      @id @default(cuid())
+  name                String
+  role                VoiceRole   @default(actor)
+  gender              VoiceGender
+  language            String
+  style               String
+  provider            String
+  providerVoiceId     String
+  sampleStorageKey    String?
+  characterDescription String?   // описание характера персонажа
+  isActive            Boolean     @default(true)
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  projects ProjectVoice[]
+
+  @@unique([provider, providerVoiceId])
+  @@index([role])
+}
+
+model ProjectVoice {
+  id          String  @id @default(cuid())
+  projectId   String
+  voiceId     String
+  roleLabel   String?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  voice   Voice   @relation(fields: [voiceId], references: [id], onDelete: Restrict)
+
+  @@unique([projectId, voiceId])
+  @@index([projectId])
+  @@index([voiceId])
+}
+
+model Audio {
+  id              String      @id @default(cuid())
+  projectId        String
+  userId           String
+  status           AudioStatus @default(queued)
+  storageKey       String?
+  durationSeconds  Int?
+  format           String?     // mp3/ogg/wav
+  errorMessage     String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([userId])
+}
+
+model RenderTask {
+  /** Детерминированный идентификатор рендера (clientId + taskId в терминах ТЗ). */
+  taskId       String            @id
+  clientId     String
+  bookId       String
+  lineId       Int
+  /** Номер главы (1..N), чтобы Core мог вычислять `chapters_ready` после рестарта. */
+  chapterId    Int?
+  /** Persisted speech structure for Stage5 assembly after restarts. */
+  speaker      String?
+  lineType     String?
+  emotion      Json?
+  isChapterHeader Boolean?
+  isSegment    Boolean?
+  segmentIndex Int?
+  segmentTotal Int?
+  baseLineId   Int?
+  engine       String
+
+  status       RenderTaskStatus @default(queued)
+  storageKey   String?
+  durationMs   Int?
+  errorMessage String?
+
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([clientId, bookId])
+  @@index([status])
+}
+
+model RenderAssembly {
+  /**
+   * Детерминированный assemblyId (hash inputs), для идемпотентности.
+   * На target: либо assemblyId hash, либо отдельная сущность — мы делаем hash.
+   */
+  assemblyId   String             @id
+  clientId     String
+  bookId       String
+  type         RenderAssemblyType
+  /** Для `book_chapter_wav`: номер главы (1..N). Для `book_final_wav`: 0. */
+  chapterId    Int                @default(0)
+
+  storageKey   String
+  durationMs   Int?
+  errorMessage String?
+
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@unique([clientId, bookId, type, chapterId])
+  @@index([clientId, bookId, type])
+}
+
+model Plan {
+  id                 String   @id @default(cuid())
+  name               String   @unique
+  monthlyPriceCents  Int
+  maxCharactersMonth Int
+  canDownload        Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  planId             String?
+  status             SubscriptionStatus @default(free)
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  providerCustomerId String?
+  providerSubscriptionId String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan Plan? @relation(fields: [planId], references: [id], onDelete: SetNull)
+}
+
+model BookSeries {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  books Book[]
+
+  @@index([userId])
+}
+
+model Book {
+  id               String    @id @default(cuid())
+  userId           String
+  title            String
+  description      String?
+  author           String?
+  genre            String?
+  seriesId        String?
+  seriesOrder      Int?
+  coverStorageKey  String?
+  appBookId        String?   // ID книги в App API для воспроизведения/скачивания
+  audiobookFolder  String?   // папка в storage/audiobooks/{user_id}/{folder} после finalize
+  language         String    @default("ru")
+  completedAt      DateTime?
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  series BookSeries? @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([seriesId])
+}
+

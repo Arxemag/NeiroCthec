@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: neuro
+      POSTGRES_PASSWORD: neuro
+      POSTGRES_DB: neurochtec
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+  api:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/api dev"
+    ports:
+      - "4000:4000"
+    env_file:
+      - ./apps/api/.env
+    volumes:
+      - ./:/usr/src/app
+      - api_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  worker:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/api worker"
+    env_file:
+      - ./apps/api/.env
+    volumes:
+      - ./:/usr/src/app
+      - api_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  web:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm install && npm run -w apps/web dev"
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./apps/web/.env
+    volumes:
+      - ./:/usr/src/app
+      - web_node_modules:/usr/src/app/node_modules
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  miniodata:
+  api_node_modules:
+  web_node_modules:
+

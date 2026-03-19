@@ -1,44 +1,85 @@
-# Dependencies
-node_modules/
-**/node_modules/
-
-# Build / cache
-.next/
-dist/
-out/
-*.tsbuildinfo
-
-# Env (keep .env.example)
-.env
-.env.local
-.env.*.local
-
-# Logs
-*.log
-npm-debug.log*
-app/*.log
-
-# OS
+########################
+# OS / Editor junk
+########################
 .DS_Store
 Thumbs.db
-
-# IDE
-.idea/
-.vscode/
-.cursor/
 *.swp
 *.swo
+.idea/
+.vscode/
+*.code-workspace
 
+########################
 # Python
+########################
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
 app/.venv/
-app/.venv*/
+app/.venv_xtts/
 
-# Runtime artifacts
+# Unit test / coverage reports
+.pytest_cache/
+.mypy_cache/
+.cache/
+.coverage*
+htmlcov/
+
+########################
+# Env / secrets (шаблоны .env.example коммитим для партнёров)
+########################
+.env
+.env.*
+app/.env
+app/.env.*
+!.env.example
+!**/.env.example
+
+########################
+# Databases / runtime artifacts
+########################
+*.db
+*.sqlite3
+app/neirocthec.db
+
+########################
+# Project-specific runtime data
+########################
 app/storage/
+app/storage/**
 
-# Prisma
-apps/api/prisma/migrations/**/migration_lock.toml
+# TTS and local services (развёрнуты локально, не коммитим)
+
+
+########################
+# Python bytecode in app
+########################
+app/__pycache__/
+app/**/__pycache__/
+
+########################
+# Frontend
+########################
+**/node_modules/
+**/.next/
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/build/
+frontend/.turbo/
+frontend/.cache/
+

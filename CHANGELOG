@@ -1,0 +1,111 @@
+# CHANGELOG
+
+Все значимые изменения в проекте фиксируются здесь. При каждом коммите с новой функциональностью или исправлениями добавляйте запись в соответствующий блок даты (или создайте новый блок с текущей датой).
+
+---
+
+## 2026-03-08
+
+### XTTS2: только Docker, без локальной установки
+- **Удалена локальная установка XTTS2:** скрипты `app/scripts/setup_venv_xtts.bat`, `run_xtts.bat`, `check_xtts_gpu.bat` удалены; разделы документации про отдельный venv и запуск XTTS2 на хосте убраны из `docs/TTS_XTTS2.md` и `DOCKER_RUN.md`. Локальный Qwen3 (порт 8020) сохранён — по умолчанию Stage4 обращается к нему по `host.docker.internal:8020`.
+- **XTTS2 переведён в стандартный пул контейнеров:** сервис `tts-xtts` больше не за профилем `nvidia-tts`; при `docker compose up -d` поднимаются в том числе `tts-xtts` (порт 8021). Для stage4 задано `EXTERNAL_TTS_XTTS_URL=http://tts-xtts:8021`, добавлен `depends_on: tts-xtts`. Все запросы озвучки через движок XTTS2 идут в контейнер.
+- **docker-compose.nvidia-tts.yml** оставлен только для опционального запуска Qwen3 в Docker: при `--profile nvidia-tts` переопределяется `EXTERNAL_TTS_QWEN3_URL=http://tts-qwen3:8020`.
+
+### Модуль tts_engine_xtts и образ XTTS2
+- **Добавлен пакет `app/tts_engine_xtts`:** ранее в репозитории не было кода сервиса XTTS2, из-за чего в контейнере возникала ошибка `ModuleNotFoundError: No module named 'tts_engine_xtts'`. Реализованы:
+  - `app/tts_engine_xtts/__init__.py` — объявление пакета;
+  - `app/tts_engine_xtts/app.py` — FastAPI-сервис с `GET /health`, `GET /voices`, `POST /synthesize`, загрузкой модели XTTS v2 в фоне, разрешением голоса через `core.voices.get_voice_path` и `speaker_wav_path`.
+- В начале `app.py` установлено `os.environ.setdefault("COQUI_TOS_AGREED", "1")` для неинтерактивного принятия лицензии Coqui в контейнере.
+
+### Лицензия Coqui и зависимость transformers
+- **Принятие лицензии Coqui без stdin:** в `app/Dockerfile.xtts` и в `docker-compose.yml` (сервис `tts-xtts`) добавлена переменная `COQUI_TOS_AGREED=1`, чтобы при первом скачивании модели XTTS v2 не возникала ошибка `EOFError: EOF when reading a line` из-за запроса подтверждения в контейнере.
+- **Фиксация версии transformers:** в `app/requirements-xtts.txt` добавлено ограничение `transformers>=4.33.0,<4.44.0` для совместимости с TTS 0.22.0 (в 4.44+ изменился экспорт `BeamSearchScorer`, из-за чего возникала ошибка импорта при загрузке модели).
+
+### GPU/CPU и том для данных XTTS
+- В `docker-compose.yml` для `tts-xtts` задано `TTS_USE_GPU=false` по умолчанию, чтобы сервис работал на машинах без NVIDIA (модель загружается на CPU; при наличии GPU можно переопределить на `true`).
+- Добавлен volume `tts_xtts_data:/root/.local/share/tts` для сохранения скачанной модели XTTS между перезапусками контейнера (ранее использовался только `tts_xtts_cache` для `.cache/tts`, тогда как модель по умолчанию кладётся в `.local/share/tts`).
+
+### Нормализация текста и параметры инференса XTTS2 (снижение артифактов)
+- **Предобработка текста перед синтезом:** в `app/tts_engine_xtts/app.py` добавлена функция `_normalize_text_for_xtts(text)`:
+  - замена типографских тире (—, –, Unicode 2013/2014) на ` - `;
+  - удаление точки в конце строки и многоточия, чтобы модель не озвучивала их как слова («точка» и т.п.);
+  - схлопывание множественных пробелов.
+- **Параметры инференса:** добавлена функция `_xtts_inference_params(audio_config)` и передача в `tts_to_file` параметров `temperature` (по умолчанию 0.35), `speed` (1.0), `split_sentences` (True). Значения берутся из `audio_config` запроса или из переменных окружения `TTS_XTTS_TEMPERATURE`, `TTS_XTTS_SPEED`, `TTS_XTTS_SPLIT_SENTENCES`. При неподдерживании `temperature`/`speed` высокоуровневым API выполняется повторный вызов без этих аргументов (fallback).
+- В `docs/TTS_XTTS2.md` описаны новые параметры в `audio_config` и переменные окружения; в контракте указано, что перед синтезом выполняется нормализация текста.
+
+### .gitignore и объём репозитория
+- В корневой `.gitignore` добавлены:
+  - `**/node_modules/` и `**/.next/` — игнорирование вложенных каталогов зависимостей и сборки Next.js (в монорепозитории frontend сборка может лежать в `frontend/apps/web/.next/`);
+  - `app/.venv_xtts/` — каталог бывшего отдельного venv для XTTS2.
+- В репозитории остаются только инструкции для установки зависимостей (`package.json`, `package-lock.json`, `requirements*.txt`); сами артефакты и зависимости не коммитятся. В документации зафиксировано, что после клона необходимо выполнить `npm install` (или поднять стек через Docker).
+
+### Документация
+- **DOCKER_RUN.md:** обновлён под схему «XTTS2 только в Docker, Qwen3 локально или в Docker по профилю»; убраны инструкции по локальному запуску XTTS2 и ссылки на удалённые скрипты; уточнены разделы про TTS и типичные проблемы.
+- **docs/TTS_XTTS2.md:** переписан под исключительно Docker-запуск; добавлены разделы про первую загрузку модели, проверку `/health`, troubleshooting при 503 и отсутствии CUDA; описаны переменные окружения (в т.ч. `COQUI_TOS_AGREED`, `TTS_USE_GPU`, `TTS_XTTS_TEMPERATURE`, `TTS_XTTS_SPEED`, `TTS_XTTS_SPLIT_SENTENCES`) и параметры `audio_config` для снижения артифактов.
+
+---
+
+## 2026-03-03
+
+### Структура проекта и инфраструктура
+- Зафиксирована целевая архитектура backend-приложения с разделением на `api`, `core`, `db`, `services` и отдельный `frontend`.
+- Определены отдельные сервисы как самостоятельные подпроекты: `stage4_service` (воркер TTS-пайплайна) и `tts_engine_service` (движок синтеза речи на Qwen3-TTS).
+
+### Git и игнорируемые файлы
+- Создан новый `.gitignore` в корне репозитория.
+- Исключены из версионирования:
+  - виртуальные окружения (`.venv`, `venv`, `env`, `app/.venv`);
+  - Python-кэш (`__pycache__`, `*.pyc`, `.pytest_cache`, `.mypy_cache`, `.cache`);
+  - локальные базы данных (`*.db`, `*.sqlite3`, `app/neirocthec.db`);
+  - runtime-хранилище и артефакты (`app/storage/`);
+  - локально развёрнутые сервисы (`app/tts_engine_service/`, `app/stage4_service/`);
+  - frontend-артефакты (`frontend/node_modules`, `.next`, `dist`, `build`, `.turbo`, `.cache`);
+  - файлы окружения (`.env`, `.env.*`, `app/.env`, `app/.env.*`);
+  - мусорные файлы ОС/IDE (`.idea`, `.vscode`, `.DS_Store`, `Thumbs.db`).
+
+### Тестирование
+- Добавлен модуль для тестов backend-приложения: `app/tests`.
+- Структура тестов:
+  - `app/tests/unit` — unit-тесты для модулей `core`, `db`, `services`;
+  - `app/tests/integration` — интеграционные тесты для API и пайплайна.
+- Реализованы первые тесты:
+  - `app/tests/unit/test_emotion_config.py` — проверяет загрузку и структуру конфигурации эмоций (`EmotionConfig` и `app/config/emotion_signals.yaml`).
+  - `app/tests/integration/test_chapters_api.py` — интеграционный тест эндпоинта `/api/chapters/{chapter_id}/process` (404 при отсутствии текста главы).
+
+### Озвучка книги и TTS-пайплайн (App API + Qwen3)
+- Добавлен модуль `app/api/routes/app_pipeline.py`:
+  - `POST /internal/process-book-stage4` — запускает пайплайн stage1–stage3 (парсинг, определение спикеров, эмоции), формирует очередь строк для озвучки и сохраняет состояние книги в памяти.
+  - `POST /internal/tts-next` / `POST /internal/tts-complete` — протокол обмена задачами между core и `stage4_service`.
+  - `GET /books/{book_id}` / `GET /books/{book_id}/status` — прогресс озвучки книги и статус для фронта.
+  - `GET /books/{book_id}/download` — сборка итогового `final.wav` через `Stage5Assembler` и скачивание финального файла.
+- Реализовано хранение артефактов озвучки:
+  - `stage4_service` складывает строки в `app/storage/books/{user_id}/{book_id}/lines/line_{id}.wav`;
+  - stage5 собирает из них `final.wav` в `app/storage/books/{user_id}/{book_id}/final.wav`.
+- На фронте:
+  - при работе через App API (`NEXT_PUBLIC_APP_API_URL`) кнопка «Сгенерировать озвучку фрагмента» обращается к новым эндпоинтам и отслеживает прогресс по `GET /books/{id}/status`;
+  - после завершения (stage `done`/`completed`) страница проекта скачивает `final.wav` через `downloadBookAudio` и отображает плеер для прослушивания результата.
+
+### Выбор голосов и интеграция с TTS
+- На странице проекта:
+  - голоса загружаются из App API (`/voices`) и/или из Nest API, группируются по ролям (диктор / мужской / женский);
+  - состояние выбранных голосов (`selectedVoiceIds`) перестало сбрасываться после загрузки файлов: `loadAll({ silent: true })` не перезатирает выбор пользователя.
+- При запуске озвучки:
+  - фронт сохраняет выбор голосов в `/books/settings/audio` и передаёт их в `POST /internal/process-book-stage4`;
+  - backend мёрджит `voice_ids` из запроса и из настроек, подставляет их в каждую строку, и передаёт в `stage4_service`/`tts_engine_service` через поле `speaker` и `audio_config.voice_ids`.
+
+### TTS-движок Qwen3 и GPU
+- Поднят и сконфигурирован `app/tts_engine_service/app.py`:
+  - `GET /health` / `GET /voices` / `POST /synthesize` с поддержкой Qwen3-TTS, espeak и mock-режима.
+  - Логика выбора устройства: при `TTS_DEVICE=auto` и доступном CUDA/ROCm по умолчанию используется GPU; при отсутствии — CPU, с явной диагностикой в логах и `/health`.
+- `stage4_service` переведён на работу с внешним TTS:
+  - запущен `stage4_service` с `STAGE4_SYNTH_MODE=external` и `EXTERNAL_TTS_URL=http://localhost:8020`;
+  - воркер забирает задачи из `core` (`/internal/tts-next`), отправляет текст в TTS и по завершении фиксирует результат через `/internal/tts-complete`.
+
+### Исправления под Windows (консоль, кодировки, финальный файл)
+- Удалены эмодзи и небезопасный вывод в пайплайне:
+  - `stage1_parser`, `stage2_speaker`, `stage5_tts` переведены на безопасный `_safe_print`, который не падает на `UnicodeEncodeError` (charmap) и закрытом stdout.
+  - Убраны спецсимволы (`🎵`, `✅`, стрелки и др.) из логов, заменены на ASCII-подписи.
+- Исправлена ошибка сборки финального файла:
+  - `Stage5Assembler` больше не роняет `GET /books/{id}/download` из-за проблем с кодировкой, успешно собирает `final.wav` и возвращает его на фронт;
+  - фронт корректно воспринимает статус `stage: "done"` и скачивает итоговый файл для прослушивания.
+

@@ -1,4 +1,9 @@
+# НейроЧтец — единый запуск всего стека из корня проекта.
+# Запуск: docker compose up -d
+# XTTS2 — в пуле по умолчанию (tts-xtts:8021). Qwen3 — локально на 8020 или в Docker с профилем nvidia-tts.
+
 services:
+  # --- Инфраструктура (Postgres, Redis, MinIO) ---
   postgres:
     image: postgres:16
     environment:
@@ -9,11 +14,23 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neuro -d neurochtec"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   minio:
     image: minio/minio:latest
@@ -26,8 +43,245 @@ services:
       - "9001:9001"
     volumes:
       - miniodata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5s bash -c ':> /dev/tcp/127.0.0.1/9000' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # --- Backend (Core API + Stage4) ---
+  core:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.core
+    ports:
+      - "8000:8000"
+      - "5678:5678"
+    volumes:
+      - ./app:/app
+      - ./app/storage:/app/storage
+    environment:
+      - PYTHONUNBUFFERED=1
+      - APP_STORAGE_ROOT=/app/storage
+      # Превью по спикерам: Core дергает stage4 по имени сервиса
+      - APP_STAGE4_URL=http://stage4:8001
+      # TaskRegistry (NestJS) — опциональная интеграция для SoT по RenderTask
+      - TASK_REGISTRY_API_URL=http://api:4000
+      # TTS очереди: Core публикует в Redis Stream, Stage4 читает
+      - REDIS_URL=redis://redis:6379
+      - TTS_USE_REDIS_QUEUE=1
+      - TTS_RENDER_STREAM=tts.render.v1
+      - TTS_STAGE4_CONSUMER_GROUP=stage4_worker
+      # S3/MinIO for artifacts
+      - S3_ENDPOINT=http://minio:9000
+      - S3_REGION=us-east-1
+      - S3_ACCESS_KEY=minio
+      - S3_SECRET_KEY=minio12345
+      - S3_BUCKET=neurochtec-audio
+      # Для отладки в PyCharm (Remote Debug): раскомментируйте; сначала запустите в PyCharm "Python Remote Debug" на порту 5678
+      # - DEBUGPY_CONNECT=1
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  stage4:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.core
+    depends_on:
+      core: { condition: service_healthy }
+      tts-xtts: { condition: service_healthy }
+    restart: on-failure
+    environment:
+      - CORE_INTERNAL_URL=http://core:8000/internal
+      - STAGE4_SYNTH_MODE=external
+      # TaskRegistry (NestJS) — опциональная интеграция для SoT по RenderTask
+      - TASK_REGISTRY_API_URL=http://api:4000
+      # TTS очереди: Stage4 читает задачи из Redis Stream
+      - REDIS_URL=redis://redis:6379
+      - TTS_USE_REDIS_QUEUE=1
+      - TTS_RENDER_STREAM=tts.render.v1
+      - TTS_STAGE4_CONSUMER_GROUP=stage4_worker
+      # S3/MinIO for artifacts
+      - S3_ENDPOINT=http://minio:9000
+      - S3_REGION=us-east-1
+      - S3_ACCESS_KEY=minio
+      - S3_SECRET_KEY=minio12345
+      - S3_BUCKET=neurochtec-audio
+      # По умолчанию Qwen3 на хосте (8020). Для Qwen3 в Docker: --profile nvidia-tts и в override задать EXTERNAL_TTS_QWEN3_URL=http://tts-qwen3:8020
+      - EXTERNAL_TTS_QWEN3_URL=http://host.docker.internal:8020
+      - EXTERNAL_TTS_XTTS_URL=http://tts-xtts:8021
+      # XTTS: первый запрос и длинные чанки могут занимать 5–10+ мин (GPU/CPU)
+      - EXTERNAL_TTS_TIMEOUT_SEC=600
+      # XTTS: первый запрос (загрузка модели) + длинный текст могут занимать 15–30 мин на CPU
+      - EXTERNAL_TTS_XTTS_TIMEOUT_SEC=1800
+      - APP_STORAGE_ROOT=/app/storage
+    volumes:
+      - ./app:/app
+      - ./app/storage:/app/storage
+    command: ["python", "-m", "stage4_service.app"]
+    deploy:
+      # При XTTS на CPU лучше 1 реплика, иначе tts-xtts не успевает и даёт 503/обрывы
+      replicas: 1
+      # Для большего числа воркеров: docker compose up -d --scale stage4=4
+
+  # --- TTS Qwen3 (NVIDIA). Не поднимать на AMD — там TTS локально на 8020. ---
+  tts-qwen3:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    runtime: nvidia
+    ports:
+      - "8020:8020"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TTS_ENGINE_PORT=8020
+      - TTS_ALLOW_DEGRADED_BACKEND=true
+      - TTS_BACKEND=auto
+    volumes:
+      - ./app/storage:/app/storage
+      - tts_cache:/root/.cache/tts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - nvidia-tts
+
+  # --- TTS XTTS2 (NVIDIA GPU). Порт 8021. Входит в стандартный пул. ---
+  tts-xtts:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.xtts
+    runtime: nvidia
+    ports:
+      - "8021:8021"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COQUI_TOS_AGREED=1
+      - TTS_USE_GPU=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TTS_ENGINE_PORT=8021
+      # Текст по умолчанию «как пришло»; TTS_XTTS_NORMALIZE_TEXT=1 — включить нормализацию (тире, кавычки)
+      - TTS_XTTS_NORMALIZE_TEXT=0
+    volumes:
+      - ./app/storage:/app/storage
+      - tts_xtts_cache:/root/.cache/tts
+      - tts_xtts_data:/root/.local/share/tts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8021/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # --- Frontend: один раз ставим зависимости (frontend_deps), затем api/worker/web только запускают скрипты ---
+  # После изменения schema.prisma перегенерировать клиент: docker compose run --rm api sh -c "npm run -w apps/api prisma:generate" && docker compose restart api
+  frontend_deps:
+    image: node:20
+    working_dir: /usr/src/app
+    volumes:
+      - ./frontend:/usr/src/app
+      - frontend_node_modules:/usr/src/app/node_modules
+    command: sh -c "rm -rf node_modules apps/api/node_modules apps/web/node_modules 2>/dev/null; npm install && npm run -w apps/api prisma:generate"
+
+  api:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm run -w apps/api prisma:generate && npm run -w apps/api prisma:migrate:deploy && npm run -w apps/api dev"
+    ports:
+      - "4000:4000"
+    env_file:
+      - ./frontend/apps/api/.env
+    environment:
+      - NODE_PATH=/usr/src/app/node_modules
+      - DATABASE_URL=postgresql://neuro:neuro@postgres:5432/neurochtec?schema=public
+      - S3_ENDPOINT=http://minio:9000
+      - REDIS_URL=redis://redis:6379
+      - APP_API_URL=http://core:8000
+      # Пустой API_BASE_URL: Nest отдаёт относительные URL (браузер ходит через Next proxy)
+      - API_BASE_URL=
+      # CORS: разрешить любой origin (при открытии по IP)
+      - CORS_ORIGIN_REGEX=^https?://[\\w.-]*(:[0-9]+)?$
+    volumes:
+      - ./frontend:/usr/src/app
+      - frontend_node_modules:/usr/src/app/node_modules
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:4000/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      frontend_deps: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+
+  worker:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm run -w apps/api prisma:generate && npm run -w apps/api worker"
+    env_file:
+      - ./frontend/apps/api/.env
+    environment:
+      - NODE_PATH=/usr/src/app/node_modules
+      - DATABASE_URL=postgresql://neuro:neuro@postgres:5432/neurochtec?schema=public
+      - S3_ENDPOINT=http://minio:9000
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./frontend:/usr/src/app
+      - frontend_node_modules:/usr/src/app/node_modules
+    depends_on:
+      frontend_deps: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+
+  web:
+    image: node:20
+    working_dir: /usr/src/app
+    command: sh -c "npm run -w apps/web dev"
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./frontend/apps/web/.env
+    environment:
+      # Пустой API_BASE = запросы на тот же хост; Next проксирует /api/* → api:4000, /app-api/* → core:8000
+      - NEXT_PUBLIC_API_BASE_URL=
+      - NEXT_PUBLIC_APP_API_URL=proxy
+      - API_PROXY_TARGET=http://api:4000
+      - APP_API_PROXY_TARGET=http://core:8000
+    volumes:
+      - ./frontend:/usr/src/app
+      - frontend_node_modules:/usr/src/app/node_modules
+      - frontend_web_next:/usr/src/app/apps/web/.next
+    depends_on:
+      frontend_deps: { condition: service_completed_successfully }
+      api: { condition: service_healthy }
+      core: { condition: service_healthy }
 
 volumes:
   pgdata:
   miniodata:
-
+  tts_cache:
+  tts_xtts_cache:
+  tts_xtts_data:
+  frontend_node_modules:
+  frontend_web_next:

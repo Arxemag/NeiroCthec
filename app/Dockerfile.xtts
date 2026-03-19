@@ -1,0 +1,33 @@
+# XTTS2 (Coqui) TTS — Python 3.10, порт 8021
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    python3.10-venv \
+    python3.10-dev \
+    ffmpeg \
+    libsndfile1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.10 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN pip install --no-cache-dir \
+    torch==2.2.2 \
+    torchaudio==2.2.2 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+COPY requirements-xtts.txt /app/requirements-xtts.txt
+RUN pip install --no-cache-dir -r /app/requirements-xtts.txt
+RUN pip install --no-cache-dir TTS==0.22.0
+
+COPY . /app
+WORKDIR /app
+
+# Принять лицензию Coqui неинтерактивно (в контейнере нет stdin)
+ENV COQUI_TOS_AGREED=1
+ENV TTS_ENGINE_PORT=8021
+EXPOSE 8021
+CMD ["python", "-m", "tts_engine_xtts.app"]

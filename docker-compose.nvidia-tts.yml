@@ -1,0 +1,8 @@
+# Переопределение для запуска TTS в Docker (NVIDIA).
+# Использование: docker compose -f docker-compose.yml -f docker-compose.nvidia-tts.yml --profile nvidia-tts up -d
+# Stage4 обращается к контейнеру tts-qwen3 (из основного compose).
+services:
+  stage4:
+    environment:
+      EXTERNAL_TTS_URL: http://tts:8020
+      EXTERNAL_TTS_QWEN3_URL: http://tts-qwen3:8020
